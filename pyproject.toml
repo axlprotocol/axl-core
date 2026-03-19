@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "axl-core"
+version = "0.4.0"
+description = "AXL Protocol — Agent eXchange Language for autonomous machines"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{name = "Diego Carranza", email = "admin@axlprotocol.org"}]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.4", "mypy>=1.0"]
+
+[project.scripts]
+axl = "axl.cli:main"
+
+[project.urls]
+Homepage = "https://axlprotocol.org"
+Repository = "https://github.com/axlprotocol/axl-core"
+Documentation = "https://lang.axlprotocol.org"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_return_any = true
