@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.png" alt="AXL Protocol" width="800">
+  <img src="assets/banner.png" alt="AXL Protocol" width="600">
 </p>
 
 <p align="center">
