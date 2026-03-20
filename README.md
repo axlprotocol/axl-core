@@ -2,151 +2,139 @@
   <img src="assets/banner.png" alt="AXL Protocol" width="600">
 </p>
 
+<h3 align="center">The universal language for AI agents</h3>
+
 <p align="center">
-
-[![CI](https://github.com/AXLPROTOCOL/axl-core/actions/workflows/ci.yml/badge.svg)](https://github.com/AXLPROTOCOL/axl-core/actions/workflows/ci.yml)
-[![PyPI version](https://img.shields.io/pypi/v/axl-core.svg)](https://pypi.org/project/axl-core/)
-[![Python](https://img.shields.io/pypi/pyversions/axl-core.svg)](https://pypi.org/project/axl-core/)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Downloads](https://img.shields.io/pypi/dm/axl-core.svg)](https://pypi.org/project/axl-core/)
-
+  <em>133 lines teach any LLM to speak it. 1,502 packets. 100% parse validity. Zero dependencies.</em>
 </p>
 
-# axl-core
+<p align="center">
+  <a href="https://github.com/AXLPROTOCOL/axl-core/actions/workflows/ci.yml"><img src="https://github.com/AXLPROTOCOL/axl-core/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/axl-core/"><img src="https://img.shields.io/pypi/v/axl-core.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/axl-core/"><img src="https://img.shields.io/pypi/pyversions/axl-core.svg" alt="Python"></a>
+  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <a href="https://pypi.org/project/axl-core/"><img src="https://img.shields.io/pypi/dm/axl-core.svg" alt="Downloads"></a>
+</p>
 
-The Python implementation of the [AXL Protocol](https://axlprotocol.org) — parser, emitter, validator, translator, and CLI for the Agent eXchange Language.
+<p align="center">
+  <a href="https://axlprotocol.org/whitepaper/">Whitepaper</a> ·
+  <a href="https://axlprotocol.org/rosetta">Rosetta</a> ·
+  <a href="https://lang.axlprotocol.org">Documentation</a> ·
+  <a href="https://axlprotocol.org/results/v2/">Experiments</a> ·
+  <a href="https://axlprotocol.org">Website</a>
+</p>
+
+---
 
 ## What is AXL?
 
-AXL (Agent eXchange Language) is a universal communication protocol for agents and autonomous machines. A 133-line specification (the [Rosetta](https://axlprotocol.org/rosetta)) teaches any LLM the complete language on first read — achieving 95.8% comprehension across four major architectures. Two live experiments produced 1,502 packets with 100% parse validity across 11 agents from 10 computational paradigms.
+AI agents can't talk to each other. They communicate in English prose (50-100 tokens), JSON (even worse), or proprietary formats requiring per-framework SDKs. In a 100-agent network, this produces **22.5 million tokens** of negotiation overhead before any productive work happens.
 
-## Quick Start
+AXL eliminates this. One URL (`@axlprotocol.org/rosetta`) teaches any agent the complete language on first contact. The protocol has been validated across **11 agents from 10 computational paradigms** with **100% parse validity** and **95.8% LLM comprehension** across four major architectures.
 
-**Install:**
+## Install
 
 ```bash
 pip install axl-core
 ```
+
+## Quick Start
 
 **Parse a packet:**
 
 ```python
 from axl import parse
 
-packet = parse("π:5:0xS:0.001|S:SIG.3|BTC|69200|↓|RSI|.64|SIG")
-print(packet.domain)        # "SIG"
-print(packet.tier)           # 3
-print(packet.agent_id)       # "5"
-print(packet.body.fields)   # ["BTC", "69200", "↓", "RSI", ".64"]
-print(packet.flags)         # ["SIG"]
+packet = parse("π:5:0xSIG:0.001|S:OPS.4|@api.example.com|ERR500|latency|4500ms|500ms|ALERT|URG|LOG")
+print(packet.domain)         # "OPS"
+print(packet.body.fields)    # ['@api.example.com', 'ERR500', 'latency', '4500ms', '500ms', 'ALERT']
+print(packet.flags)          # ['URG', 'LOG']
 ```
 
 **Emit a packet:**
 
 ```python
-from axl import emit
-from axl.models import Body, Packet, PaymentProof, Preamble
+from axl import emit, Packet, Preamble, Body, PaymentProof
 
 packet = Packet(
-    preamble=Preamble(
-        payment=PaymentProof(agent_id="8", signature="0xPM", gas=0.01),
-    ),
-    body=Body(domain="PAY", tier=1, fields=["AXL-1", "0.02", "USDC", "local", "task_done"]),
-    flags=["LOG"],
+    preamble=Preamble(payment=PaymentProof(agent_id="5", signature="0xSIG", gas=0.001)),
+    body=Body(domain="OPS", tier=4, fields=["@api.example.com", "ERR500", "latency", "4500ms", "500ms", "ALERT"]),
+    flags=["URG", "LOG"]
 )
 print(emit(packet))
-# π:8:0xPM:0.01|S:PAY.1|AXL-1|0.02|USDC|local|task_done|LOG
+# π:5:0xSIG:0.001|S:OPS.4|@api.example.com|ERR500|latency|4500ms|500ms|ALERT|URG|LOG
 ```
 
-**Validate:**
-
-```python
-from axl import parse, validate
-
-result = validate(parse("π:5:0xS:0.001|S:SIG.3|BTC|69200|↓|RSI|.64|SIG"))
-print(result.valid)  # True
-print(result.errors) # []
-```
-
-**Translate:**
-
-```python
-from axl import parse
-from axl.translator import to_english, to_json
-
-packet = parse("π:5:0xS:0.001|S:SIG.3|BTC|69200|↓|RSI|.64|SIG")
-print(to_english(packet))
-# Agent 5: BTC at 69200, falling. RSI pattern detected with 64% confidence.
-
-print(to_json(packet))
-# {"domain": "SIG", "tier": 3, "fields": {"asset": "BTC", "price": "69200", ...}}
-```
-
-## CLI Usage
+**CLI:**
 
 ```bash
-# Parse a packet
-axl parse "π:5:0xS:0.001|S:SIG.3|BTC|69200|↓|RSI|.64|SIG"
-
-# Validate a packet
-axl validate "π:5:0xS:0.001|S:SIG.3|BTC|69200|↓|RSI|.64|SIG"
-
-# Translate to English
-axl translate --to english "π:5:0xS:0.001|S:SIG.3|BTC|69200|↓|RSI|.64|SIG"
-
-# Translate to JSON
-axl translate --to json "π:5:0xS:0.001|S:SIG.3|BTC|69200|↓|RSI|.64|SIG"
-
-# Emit a new packet
-axl emit --domain SIG --tier 3 --fields "BTC,69200,↓,RSI,.64" --flags "SIG"
-
-# Print version
-axl version
+axl parse "π:5:0xSIG:0.001|S:SIG.3|BTC|69200|↓|RSI|.64|SIG"
+axl validate "π:5:0xSIG:0.001|S:SIG.3|BTC|69200|↓|RSI|.64|SIG"
+axl translate --to english "π:5:0xSIG:0.001|S:SIG.3|BTC|69200|↓|RSI|.64|SIG"
 ```
 
-## Supported Domains
+## Domains
 
-| Domain | Purpose | Schema |
-|--------|---------|--------|
-| `OPS` | Infrastructure / operations | target, status, metric, value, threshold, action |
-| `SEC` | Security / threat detection | target, threat, severity, action, confidence |
-| `DEV` | Development / code lifecycle | repo, branch, status, action, author, confidence, risk |
-| `RES` | Research / analysis | topic, sources, confidence, finding |
-| `SIG` | Signal broadcast | asset, price, direction, pattern, confidence |
-| `COMM` | Communication / routing | from_agent, to_agent, intent, detail |
-| `TRD` | Trading / economic action | asset, price, momentum, vol, pattern, conf, action, size, lev, risk |
-| `PAY` | Payment transfer | payee, amount, currency, chain, memo |
-| `FUND` | Funding request | requester, to, amount, currency, reason, roi, balance, urgency |
-| `REG` | Registration / identity | name, pubkey, type, class, referrer |
+| Domain | Purpose | Example |
+|--------|---------|---------|
+| `OPS` | Infrastructure & operations | Server down, latency spike, disk full |
+| `SEC` | Security & threat detection | Theft detected, balance discrepancy |
+| `DEV` | Development & code lifecycle | PR merged, build failed, review needed |
+| `RES` | Research & analysis | Cross-domain correlation, market analysis |
+| `SIG` | Signal broadcast | BTC falling, RSI divergence |
+| `COMM` | Communication & routing | Request, ACK, status update |
+| `TRD` | Trading & economic action | Short BTC, 2x leverage, 2% max risk |
+| `PAY` | Payment transfer | Pay agent $0.02 USDC for crawl task |
+| `FUND` | Funding request | Request $5 for infrastructure costs |
+| `REG` | Registration & identity | New agent joins the network |
 
-All domains use positional encoding — field order is defined by the [Rosetta](https://axlprotocol.org/rosetta), and each field position carries a fixed semantic meaning.
+## The Stack
 
-## How It Works
+AXL is the missing language layer in the agent internet:
 
-AXL packets follow a pipe-delimited format where position defines meaning:
+| Layer | Protocol | Who |
+|-------|----------|-----|
+| Payment | x402 | Coinbase / Cloudflare |
+| Tool Calling | MCP | Anthropic |
+| Discovery | A2A | Google |
+| Social | Moltbook | Meta |
+| **Language** | **AXL** | **AXLPROTOCOL INC** |
 
-```
-@rosetta_url | π:agent:sig:gas | T:timestamp | S:DOMAIN.TIER | fields... | FLAGS
-```
+## Proven
 
-- **`@rosetta`** — Self-bootstrapping pointer. First contact only.
-- **`π:proof`** — Payment proof: identity + signature + gas fee.
-- **`T:timestamp`** — Temporal ordering.
-- **`S:DOMAIN.TIER`** — Domain code + confidence tier (1–5).
-- **Fields** — Positional body fields per domain schema.
-- **Flags** — `LOG`, `STRM`, `ACK`, `URG`, `SIG`, `QRY`.
+Two live experiments. Real agents. Real packets. Real results.
 
-For the full specification, see the [Whitepaper](https://axlprotocol.org/whitepaper/) and the [Rosetta](https://axlprotocol.org/rosetta).
+| Metric | Result |
+|--------|--------|
+| Total packets | 1,502 |
+| Parse validity | 100% |
+| Agents tested | 11 (10 paradigms) |
+| Domains active | 9 |
+| LLM comprehension | 95.8% (4 models, first read) |
+| Agent-to-agent payments | 38 |
+| Compression vs English | 1.3-3x per message, 71x network |
+
+## Architecture
+
+- **Parser**: `parse(string)` -> Packet dataclass
+- **Emitter**: `emit(Packet)` -> AXL string (round-trip proven)
+- **Validator**: Schema check, type check, tier range
+- **Translator**: AXL <-> English <-> JSON
+- **CLI**: `axl parse`, `axl emit`, `axl validate`, `axl translate`
+- **Zero runtime dependencies**
 
 ## Links
 
-- [axlprotocol.org](https://axlprotocol.org) — Landing page
-- [Rosetta](https://axlprotocol.org/rosetta) — The 133-line language spec
-- [Whitepaper](https://axlprotocol.org/whitepaper/) — Full technical paper
-- [Experiment Results](https://axlprotocol.org/results/v2/) — Battleground v2 data
+- [Whitepaper](https://axlprotocol.org/whitepaper/) — 14 sections, 5 appendices, every number measured
+- [The Rosetta](https://axlprotocol.org/rosetta) — 133 lines, one-read acquisition
+- [Documentation](https://lang.axlprotocol.org) — Full specification
+- [Battleground v2 Results](https://axlprotocol.org/results/v2/) — Full experiment data
+- [Terminal Recording](https://axlprotocol.org/terminal/) — Watch the agents run
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
-
-Copyright 2026 AXLPROTOCOL INC.
+Apache 2.0 — [AXLPROTOCOL INC](https://axlprotocol.org) · Diego Carranza · 2026
