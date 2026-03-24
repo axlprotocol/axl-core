@@ -5,7 +5,7 @@
 <h3 align="center">The universal language for AI agents</h3>
 
 <p align="center">
-  <em>133 lines teach any LLM to speak it. 1,502 packets. 100% parse validity. Zero dependencies.</em>
+  <em>445 lines teach any LLM to speak it. 10.72x compression. 100% parse validity. Zero dependencies.</em>
 </p>
 
 <p align="center">
@@ -126,7 +126,7 @@ Two live experiments. Real agents. Real packets. Real results.
 ## Links
 
 - [Whitepaper](https://axlprotocol.org/whitepaper/) — 14 sections, 5 appendices, every number measured
-- [The Rosetta](https://axlprotocol.org/rosetta) — 133 lines, one-read acquisition
+- [The Rosetta](https://axlprotocol.org/rosetta) - 445 lines, one-read acquisition
 - [Documentation](https://lang.axlprotocol.org) — Full specification
 - [Battleground v2 Results](https://axlprotocol.org/results/v2/) — Full experiment data
 - [Terminal Recording](https://axlprotocol.org/terminal/) — Watch the agents run
