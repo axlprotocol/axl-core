@@ -123,18 +123,23 @@ Two live experiments. Real agents. Real packets. Real results.
 - **CLI**: `axl parse`, `axl emit`, `axl validate`, `axl translate`
 - **Zero runtime dependencies**
 
-## Parser Status
+## v3 Support
 
-axl-core 0.4.x includes a v1 format parser.
-Full v3 parser, emitter, validator, and translator ship in 0.5.0.
-The v3 kernel is included at `rosetta/v3.md` and live at [axlprotocol.org/v3](https://axlprotocol.org/v3).
-
-Quick v3 parse (positional split):
+Full v3 parser, emitter, validator, and translator included.
+Auto-detects v1 vs v3 format. All v1 code preserved for backward compatibility.
 
 ```python
-fields = packet.split("|")
-# fields[0]=ID, fields[1]=OP.CC, fields[2]=SUBJ,
-# fields[3]=ARG1, fields[4]=ARG2, fields[5]=TEMP
+from axl import parse_v3, emit_v3, validate_v3, v3_to_json, v3_to_english
+
+pkt = parse_v3("ID:MKT-01|OBS.99|$BTC|^67420|^fund:-0.02%+^OI:12.4B|NOW")
+print(pkt.operation)      # Operation.OBS
+print(pkt.confidence)     # 99
+print(pkt.subject_value)  # BTC
+
+print(emit_v3(pkt))       # ID:MKT-01|OBS.99|$BTC|^67420|^fund:-0.02%+^OI:12.4B|NOW
+print(v3_to_english(pkt)) # MKT-01 observes $BTC at ^67420 with 99% confidence.
+print(v3_to_json(pkt))    # {"v":"3","id":"MKT-01","op":"OBS","cc":99,...}
+print(validate_v3(pkt))   # [] (no errors)
 ```
 
 ## Links

@@ -11,54 +11,86 @@ import sys
 
 
 def _do_parse(args: argparse.Namespace) -> None:
-    from axl.parser import parse
+    from axl.parser import detect_version, parse, parse_v3
 
-    packet = parse(args.packet)
-    print(f"Domain : {packet.domain}")
-    print(f"Tier   : {packet.tier}")
-    if packet.agent_id:
-        print(f"Agent  : {packet.agent_id}")
-    if packet.preamble.rosetta_url:
-        print(f"Rosetta: {packet.preamble.rosetta_url}")
-    if packet.preamble.timestamp:
-        print(f"Time   : {packet.preamble.timestamp}")
-    if packet.preamble.payment:
-        p = packet.preamble.payment
-        print(f"Payment: agent={p.agent_id} sig={p.signature} gas={p.gas}")
-    if packet.body.fields:
-        print(f"Fields : {packet.body.fields}")
-    if packet.flags:
-        print(f"Flags  : {packet.flags}")
+    version = detect_version(args.packet)
+    if version == "v3":
+        pkt = parse_v3(args.packet)
+        print(f"Version: v3")
+        print(f"ID     : {pkt.id}")
+        print(f"Op     : {pkt.operation.value}.{pkt.confidence:02d}")
+        print(f"Subject: {pkt.subject_tag.value}{pkt.subject_value}")
+        if pkt.arg1:
+            print(f"ARG1   : {pkt.arg1}")
+        if pkt.arg2:
+            print(f"ARG2   : {pkt.arg2}")
+        print(f"Temporal: {pkt.temporal}")
+        if pkt.meta:
+            print(f"Meta   : {pkt.meta}")
+    else:
+        packet = parse(args.packet)
+        print(f"Version: v1")
+        print(f"Domain : {packet.domain}")
+        print(f"Tier   : {packet.tier}")
+        if packet.agent_id:
+            print(f"Agent  : {packet.agent_id}")
+        if packet.preamble.rosetta_url:
+            print(f"Rosetta: {packet.preamble.rosetta_url}")
+        if packet.preamble.timestamp:
+            print(f"Time   : {packet.preamble.timestamp}")
+        if packet.preamble.payment:
+            p = packet.preamble.payment
+            print(f"Payment: agent={p.agent_id} sig={p.signature} gas={p.gas}")
+        if packet.body.fields:
+            print(f"Fields : {packet.body.fields}")
+        if packet.flags:
+            print(f"Flags  : {packet.flags}")
 
 
 def _do_validate(args: argparse.Namespace) -> None:
-    from axl.parser import parse
-    from axl.validator import validate
+    from axl.parser import detect_version, parse, parse_v3
+    from axl.validator import validate, validate_v3
 
-    packet = parse(args.packet)
-    result = validate(packet)
-
-    if result.ok:
-        print("PASS")
+    version = detect_version(args.packet)
+    if version == "v3":
+        pkt = parse_v3(args.packet)
+        errors = validate_v3(pkt)
+        if not errors:
+            print("PASS (v3)")
+        else:
+            print("FAIL (v3)")
+            for e in errors:
+                print(f"  ERROR: {e}")
     else:
-        print("FAIL")
-
-    for w in result.warnings:
-        print(f"  WARNING [{w.field_name}]: {w.message}")
-    for e in result.errors:
-        print(f"  ERROR   [{e.field_name}]: {e.message}")
+        packet = parse(args.packet)
+        result = validate(packet)
+        if result.ok:
+            print("PASS (v1)")
+        else:
+            print("FAIL (v1)")
+        for w in result.warnings:
+            print(f"  WARNING [{w.field_name}]: {w.message}")
+        for e in result.errors:
+            print(f"  ERROR   [{e.field_name}]: {e.message}")
 
 
 def _do_translate(args: argparse.Namespace) -> None:
-    from axl.parser import parse
-    from axl.translator import to_english, to_json
+    from axl.emitter import v3_to_json
+    from axl.parser import detect_version, parse, parse_v3
+    from axl.translator import to_english, to_json, v3_to_english
 
-    packet = parse(args.packet)
+    version = detect_version(args.packet)
 
     if args.to == "english":
-        print(to_english(packet))
+        if version == "v3":
+            print(v3_to_english(parse_v3(args.packet)))
+        else:
+            print(to_english(parse(args.packet)))
     elif args.to == "json":
-        print(json.dumps(to_json(packet), indent=2))
+        if version == "v3":
+            print(json.dumps(v3_to_json(parse_v3(args.packet)), indent=2))
+        else:
+            print(json.dumps(to_json(parse(args.packet)), indent=2))
     else:
         print(f"Unknown format: {args.to}", file=sys.stderr)
         sys.exit(1)

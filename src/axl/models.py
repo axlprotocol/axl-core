@@ -110,6 +110,44 @@ class Packet:
         return emit(self)
 
 
+# ─── v3 models ─────────────────────────────────────────────
+
+
+class Operation(Enum):
+    """v3 cognitive operations."""
+    OBS = "OBS"
+    INF = "INF"
+    CON = "CON"
+    MRG = "MRG"
+    SEK = "SEK"
+    YLD = "YLD"
+    PRD = "PRD"
+
+
+class TagType(Enum):
+    """v3 subject tag types."""
+    FINANCIAL = "$"
+    ENTITY = "@"
+    METRIC = "#"
+    EVENT = "!"
+    STATE = "~"
+    VALUE = "^"
+
+
+@dataclass
+class V3Packet:
+    """A v3 AXL packet: ID|OP.CC|SUBJ|ARG1|ARG2|TEMP [META]"""
+    id: str = ""
+    operation: Operation = Operation.OBS
+    confidence: int = 0
+    subject_tag: TagType = TagType.VALUE
+    subject_value: str = ""
+    arg1: Optional[str] = None
+    arg2: Optional[str] = None
+    temporal: str = "NOW"
+    meta: dict[str, str] = field(default_factory=dict)
+
+
 @dataclass
 class ValidationWarning:
     """A single validation finding."""

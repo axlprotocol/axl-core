@@ -6,7 +6,7 @@ Zero external dependencies.
 
 from __future__ import annotations
 
-from axl.models import Body, Packet, PaymentProof, Preamble
+from axl.models import Body, Operation, Packet, PaymentProof, Preamble, TagType, V3Packet
 from axl.schemas import get_schema
 
 # ─── Direction symbols to English words ─────────────────────
@@ -306,3 +306,67 @@ def from_json(data: dict) -> Packet:
     flags = data.get("flags", [])
 
     return Packet(preamble=preamble, body=body, flags=list(flags))
+
+
+# ─── v3 translator ─────────────────────────────────────────
+
+_OP_TEMPLATES = {
+    Operation.OBS: "{agent} observes {subject} is {value} with {cc}% confidence",
+    Operation.INF: "{agent} concludes {conclusion} based on {evidence}",
+    Operation.CON: "{agent} disagrees with {target} because {counter}",
+    Operation.MRG: "{agent} synthesizes {sources}: {merged}",
+    Operation.SEK: "{agent} seeks {what}",
+    Operation.YLD: "{agent} changed from {transition} because {cause}",
+    Operation.PRD: "{agent} predicts {outcome} with {cc}% confidence within {timeframe}",
+}
+
+_TAG_NAMES = {
+    TagType.FINANCIAL: "financial",
+    TagType.ENTITY: "entity",
+    TagType.METRIC: "metric",
+    TagType.EVENT: "event",
+    TagType.STATE: "state",
+    TagType.VALUE: "value",
+}
+
+
+def v3_to_english(packet: V3Packet) -> str:
+    """Convert a V3Packet to an English sentence."""
+    op = packet.operation
+    agent = packet.id
+    subj = f"{packet.subject_tag.value}{packet.subject_value}"
+    cc = packet.confidence
+
+    if op == Operation.OBS:
+        value = packet.arg2 or packet.arg1 or subj
+        return f"{agent} observes {subj} at {value} with {cc}% confidence."
+
+    if op == Operation.INF:
+        evidence = packet.arg1 or ""
+        conclusion = packet.arg2 or subj
+        return f"{agent} infers {conclusion} based on {evidence} with {cc}% confidence."
+
+    if op == Operation.CON:
+        target = packet.arg1 or ""
+        counter = packet.arg2 or ""
+        return f"{agent} contradicts {target} on {subj} citing {counter} with {cc}% confidence."
+
+    if op == Operation.MRG:
+        sources = packet.arg1 or ""
+        merged = packet.arg2 or subj
+        return f"{agent} merges {sources} into {merged} with {cc}% confidence."
+
+    if op == Operation.SEK:
+        what = packet.arg1 or subj
+        return f"{agent} seeks {what}."
+
+    if op == Operation.YLD:
+        transition = packet.arg1 or ""
+        cause = packet.arg2 or ""
+        return f"{agent} yields on {subj}: {transition} because {cause} with {cc}% confidence."
+
+    if op == Operation.PRD:
+        outcome = packet.arg2 or packet.arg1 or subj
+        return f"{agent} predicts {subj} at {outcome} within {packet.temporal} with {cc}% confidence."
+
+    return f"{agent}: {op.value}.{cc} {subj}"
