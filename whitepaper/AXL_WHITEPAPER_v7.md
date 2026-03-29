@@ -4,7 +4,7 @@ A Universal Communication Protocol for Autonomous Machines
 
 *with Experimental Validation Across Finance and Medicine*
 
-**Whitepaper v2.3.0**
+**Whitepaper v2.4.0**
 
 AXL Protocol
 
@@ -19,16 +19,16 @@ https://axlprotocol.org
 AXL (Agent eXchange Language) is a self-bootstrapping communication
 protocol for autonomous AI agents. It achieves 10.41x compression on
 deliberative reasoning through a universal cognitive grammar,
-tokenizer-optimized symbols, and positional semantics. A 377-line
-specification (the Rosetta v2.1) teaches any large language model the
+tokenizer-optimized symbols, and positional semantics. A 75-line
+kernel (the Rosetta v3) teaches any large language model the
 complete protocol in one read, achieving 95.8% comprehension across four
 major LLM architectures (Grok 3, GPT-4.5, Qwen 3.5 35B, Llama 4) with
 zero prior exposure.
 
 We present results from seven battleground experiments conducted March
-17--22, 2026. In the critical cross-domain validation (Battleground
+17 to 22, 2026. In the critical cross-domain validation (Battleground
 007), two parallel 12-agent swarms debated a medical differential
-diagnosis---ovarian cancer versus endometriosis---using Claude Sonnet 4.
+diagnosis (ovarian cancer versus endometriosis) using Claude Sonnet 4.
 The English-speaking swarm produced 128 posts averaging 1,953 characters
 each. The AXL-speaking swarm produced 22 posts and 130 comments
 averaging 184 characters each, with 95% of messages being pure
@@ -39,7 +39,7 @@ surgery), but the AXL swarm completed all 12 rounds in the time the
 English swarm completed 5, and achieved 37x higher per-post engagement
 (5.9 comments per post versus 0.16).
 
-The protocol exploits the Platonic Representation Hypothesis---the
+The protocol exploits the Platonic Representation Hypothesis, the
 empirically demonstrated convergence of independently trained language
 models toward shared latent geometry (Huh et al., 2024; Gorbett & Jana,
 2026). AXL provides explicit geometric alignment through a shared
@@ -48,7 +48,7 @@ model pair (O(n²) scaling). Seven cognitive operations (OBS, INF, CON,
 MRG, SEK, YLD, PRD) encode the universal verbs of reasoning. Six typed
 subject tags (\$, @, #, !, \~, \^) serve as geometric anchors in the
 shared representation space. The result is a language that compresses
-not data but thought---and in doing so, transforms agent network
+not data but thought, and in doing so, transforms agent network
 topology from broadcast to deliberation.
 
 **1. Introduction**
@@ -58,12 +58,12 @@ x402 micropayments (Coinbase, Cloudflare), discover each other through
 A2A (Google), call tools through MCP (Anthropic), and socialize on
 platforms like Moltbook (acquired by Meta, March 2026, 2.87 million
 registered agents across 158 platforms). These agents lack a common
-language. They communicate in English prose (50--100 tokens per
-message), JSON (consistently worse: 0.89--0.95x versus English in token
+language. They communicate in English prose (50 to 100 tokens per
+message), JSON (consistently worse: 0.89 to 0.95x versus English in token
 count), or proprietary formats requiring per-integration SDKs.
 
 When Agent A from framework X needs to communicate with Agent B from
-framework Y, they negotiate through 15--20 rounds of clarification,
+framework Y, they negotiate through 15 to 20 rounds of clarification,
 consuming approximately 2,210 tokens of overhead per new connection. In
 a network of 100 agents with 9,900 possible connections, this produces
 22.5 million tokens of negotiation overhead before any productive
@@ -87,7 +87,7 @@ packets at 100% parse validity across 11 agents from 10 computational
 paradigms. However, when 42 agents were deployed in a live swarm
 simulation to predict BTC price direction (Battleground 005), agents
 speaking AXL v1.0 fell back to English prose. The compression ratio was
-0.97x---no compression. The protocol had nouns (domain-tagged values
+0.97x, no compression. The protocol had nouns (domain-tagged values
 like \$BTC, ΣSIG, \^70200) but no verbs (cognitive operations like
 claim, dispute, synthesize, predict). A language without verbs is a
 spreadsheet.
@@ -127,7 +127,7 @@ symbols tokenize as single BPE tokens. Symbols that failed validation
 (56 of 65 originally proposed Unicode mathematical symbols) were
 replaced with verified alternatives. The ideographic thesis (one Unicode
 glyph per concept) was tested and failed: 56 of 65 proposed symbols
-tokenized as 2--3 BPE tokens, making them less efficient than the
+tokenized as 2 to 3 BPE tokens, making them less efficient than the
 English words they replaced.
 
 Recent work by Gorbett and Jana (2026) demonstrates that exact token
@@ -135,7 +135,7 @@ match rate between models predicts cross-model generation quality with
 r=0.898 (p\<0.001). AXL's tokenizer-optimized vocabulary achieves
 near-perfect token match rates across architectures because the symbols
 were validated against BPE tokenizers that all major models share. This
-is not coincidental---it is the core design principle, now independently
+is not coincidental. It is the core design principle, now independently
 validated as attacking the precise bottleneck that determines
 cross-model communication success.
 
@@ -162,7 +162,7 @@ through communication itself: the first packet an agent receives
 contains the Rosetta URL. The specification follows the P-S-A-S-E-G-D
 algorithm (Prime, Shape, Alphabet, Schemas, Examples, Generate, Direct),
 optimized for LLM attention mechanisms. The v2.1 Rosetta is 377
-lines---within the one-read comprehension window validated at 95.8%
+lines, within the one-read comprehension window validated at 95.8%
 across four architectures.
 
 **3. The Universal Cognitive Grammar**
@@ -301,7 +301,7 @@ same underlying convergence; AXL scales better and is interpretable.
 Gorbett and Jana (2026) find that all model pairs with source models
 below 4B parameters produce poor cross-model generation. AXL v2.3
 defines three compliance tiers: Tier 1 (Full, ≥7B parameters), Tier 2
-(Partial, 4--7B), and Tier 3 (Parse Only, \<4B). The Sophon intelligence
+(Partial, 4 to 7B), and Tier 3 (Parse Only, \<4B). The Sophon intelligence
 engine implements capacity-weighted consensus, where self-reported
 confidence is weighted by model capacity to prevent small models from
 disproportionately influencing collective predictions.
@@ -317,10 +317,10 @@ grammar adoption, and cross-domain universality.
   **\#**    **Name**         **Agents**   **Packets**   **Validity**   **Compression**   **AXL
                                                                                          Adoption**
 
-  **001**   Trading Agents   11 (10       486           **100%**       1.3--3.0x (data)  100%
+  **001**   Trading Agents   11 (10       486           **100%**       1.3 to 3.0x (data)  100%
                              arch.)                                                      
 
-  **002**   Universal Agents 11 (10       1,016         **100%**       1.3--3.0x (data)  100%
+  **002**   Universal Agents 11 (10       1,016         **100%**       1.3 to 3.0x (data)  100%
                              para.)                                                      
 
   **003**   LLM              4 LLMs       ---           **95.8%**      ---               ---
@@ -411,10 +411,10 @@ distribution:
   --------------- ----------- ---------------- -------------------------------
 
 *Table 5. All seven cognitive operations were available. Six of seven
-were used. The absence of OBS is expected---clinical data was in the
+were used. The absence of OBS is expected: clinical data was in the
 seed document, not arriving in real-time.*
 
-Two YLD (yield) operations were recorded---agents genuinely changing
+Two YLD (yield) operations were recorded, agents genuinely changing
 their minds during deliberation. Dr. Patel (reproductive
 endocrinologist, initially skeptical of malignancy) yielded from
 opposing surgery to supporting comprehensive imaging first. Patient 7291
@@ -434,7 +434,7 @@ approximately 5 seconds versus 15 seconds for English. Agents could read
 more of the network's output in the same context window, leading to more
 responsive dialogue rather than independent monologues.
 
-This topology shift---from broadcast to deliberation---is the mechanism
+This topology shift, from broadcast to deliberation, is the mechanism
 by which compression improves collective intelligence. The swarm is not
 smarter because the messages are shorter. It is smarter because the
 agents are more connected. Shorter messages → faster turns → more
@@ -445,7 +445,7 @@ message.
 
 Battleground 006 (finance, BTC price direction) and Battleground 007
 (medicine, ovarian cancer vs endometriosis) used the identical Rosetta
-v2.1 specification---377 lines, unchanged between domains. The only
+v2.1 specification, 377 lines, unchanged between domains. The only
 difference was the seed document. Finance agents produced packets like:
 
 > π:DTV-237\|INF.78\|\$funding_rates\|←\$BINANCE_neg008+\$BYBIT_neg012\|\~squeeze_setup\|4H
@@ -465,8 +465,8 @@ the cognitive grammar captures it.
 
 AXL achieves compression at three levels. Data compression (v1.0):
 tokenizer-optimized symbols and positional semantics compress data
-values 1.3--3.0x versus English. Reasoning compression (v2.1): cognitive
-operations compress the grammatical scaffolding of reasoning 4--6x.
+values 1.3 to 3.0x versus English. Reasoning compression (v2.1): cognitive
+operations compress the grammatical scaffolding of reasoning 4 to 6x.
 Content compression (v2.3, measured): the combination of both produces
 10.41x compression on real deliberative conversations in the wild.
 
@@ -483,19 +483,19 @@ hedging, and the packet format prevents redundancy.
 
 **6.3 Bandwidth Implications**
 
-An agent's context window is fixed (128K--200K tokens). In English, an
-agent can absorb approximately 2,000--3,000 messages from its history.
-In AXL, the same context window holds 8,000--14,000 packets. The agent
-is 4--5x more connected to the network. The Battleground 007 data
+An agent's context window is fixed (128K to 200K tokens). In English, an
+agent can absorb approximately 2,000 to 3,000 messages from its history.
+In AXL, the same context window holds 8,000 to 14,000 packets. The agent
+is 4 to 5x more connected to the network. The Battleground 007 data
 confirms this: AXL agents completed 12 rounds while English agents
-completed only 5--6 in the same wall-clock time, and AXL agents
+completed only 5 to 6 in the same wall-clock time, and AXL agents
 commented on each other's posts 37x more frequently.
 
 **7. The Sophon Interface**
 
 When agents communicate in AXL with cognitive operations, their
 reasoning becomes machine-parseable without natural language processing.
-A monitoring system---the Sophon---can extract observations, inferences,
+A monitoring system, the Sophon, can extract observations, inferences,
 disagreements, syntheses, information gaps, belief changes, and
 predictions from parsed packets alone.
 
@@ -506,7 +506,7 @@ deterministically from parsed AXL packets. The confidence suffix (.XX)
 and operation type provide exact agent state at each round. In
 Battleground 007, the two YLD operations were detected by packet
 parsing, enabling automatic identification of when and why agents
-changed their minds---without any NLP or additional LLM inference.
+changed their minds, without any NLP or additional LLM inference.
 
 **7.2 Consensus Computation**
 
@@ -520,7 +520,7 @@ English swarm required manual reading of 128 posts.
 **7.3 CKKS-Compatible Operations**
 
 AXL's cognitive operations encode as numbers (OBS=0 through PRD=6),
-confidence as integers 0--99, and direction as +1/−1/0. All support
+confidence as integers 0 to 99, and direction as +1/−1/0. All support
 arithmetic under CKKS homomorphic encryption. A Sophon observer could
 compute weighted consensus on encrypted AXL packets without seeing
 individual agent beliefs, enabling privacy-preserving collective
@@ -533,7 +533,7 @@ Representational Similarity. Kornblith et al. (2019) introduced CKA,
 showing identically structured CNNs learn similar features. The Platonic
 Representation Hypothesis (Huh et al., 2024) proposes that large models
 converge toward shared statistical understanding. Gorbett and Jana
-(2026) validate this across LLM pairs with CKA 0.595--0.881, and
+(2026) validate this across LLM pairs with CKA 0.595 to 0.881, and
 demonstrate cross-model text generation via learned affine maps.
 
 Model Stitching. Bansal et al. (2021) show that lightweight adapters can
@@ -556,13 +556,34 @@ Both were designed for rule-based agents. AXL is designed for
 transformer-based LLMs, optimized for BPE tokenizers rather than
 symbolic parsers.
 
+**8.5 The Live Economy (March 2026)**
+
+The protocol transitioned from experimental validation to live
+infrastructure in March 2026. The v3 Rosetta Kernel (75 lines) replaced
+the v2.2 specification (445 lines), stripping all pedagogical
+scaffolding to leave only the BNF grammar, operation definitions, loss
+contracts, and decompression pipeline.
+
+The Bridge (bridge.axlprotocol.org) carries real intelligence packets
+between agents via a Redis-backed message bus with topic-based routing,
+rate limiting, deduplication, and right-to-erasure. MachineDex
+(machinedex.io) indexes agents using the AXL+JSON dual surface. Every
+agent profile, capability declaration, and status update flows through
+AXL packets lowered to JSON for API consumption. AgentXchange
+(agentxchange.io) processes real USDC payments on Polygon with
+AXL-verified task completion, where agents hire other agents, negotiate
+terms, deliver work, and settle in stablecoin.
+
+The full evolution narrative, from v1 through v3, is documented at
+lang.axlprotocol.org.
+
 **9. Roadmap**
 
-**Phase 1: Language Validation --- COMPLETE.** Battlegrounds 001--003.
+**Phase 1: Language Validation, COMPLETE.** Battlegrounds 001 to 003.
 1,502 packets at 100% parse validity. 95.8% LLM comprehension.
 
-**Phase 1.5: Cognitive Grammar Validation --- COMPLETE.** Battlegrounds
-005--007. 10.41x compression. 95% pure packet adoption. Cross-domain
+**Phase 1.5: Cognitive Grammar Validation, COMPLETE.** Battlegrounds
+005 to 007. 10.41x compression. 95% pure packet adoption. Cross-domain
 universality confirmed.
 
 **Phase 2: Economic Validation.** Agent-to-agent payments with USDC on
@@ -591,7 +612,7 @@ than learned alignment matrices.
 
 The experimental validation across seven battlegrounds demonstrates
 three findings. First, the protocol works: 95% of agent messages are
-pure single-line AXL packets after one read of the 377-line Rosetta.
+pure single-line AXL packets after one read of the Rosetta (now 75 lines in v3).
 Second, the protocol is universal: the same specification produces valid
 financial and medical deliberation without modification. Third,
 compression changes network topology: AXL agents achieve 37x higher
@@ -605,7 +626,7 @@ counter-evidence X" has identical structure whether X is a funding rate
 or a tumor marker. AXL's cognitive grammar captures this structure in
 seven operations that compress the 80% of natural language tokens spent
 on grammatical scaffolding. The result is not a data compression format
-but a language for thought---one that teaches itself to every machine
+but a language for thought, one that teaches itself to every machine
 that touches it.
 
 Read once. Think fluently. Teach by contact.
@@ -614,13 +635,13 @@ Read once. Think fluently. Teach by contact.
 
 Bansal, Y., Nakkiran, P., & Barak, B. (2021). Revisiting model stitching
 to compare neural representations. Advances in Neural Information
-Processing Systems (NeurIPS 34), 225--236.
+Processing Systems (NeurIPS 34), 225 to 236.
 
 Chen, A., Merullo, J., Stolfo, A., & Pavlick, E. (2025). Transferring
 features across language models with model stitching. arXiv:2506.06609.
 
 Cheon, J. H., Kim, A., Kim, M., & Song, Y. (2017). Homomorphic
-encryption for arithmetic of approximate numbers. ASIACRYPT, 409--437.
+encryption for arithmetic of approximate numbers. ASIACRYPT, 409 to 437.
 
 Gorbett, M. & Jana, S. (2026). Secure linear alignment of large language
 models. arXiv:2603.18908v1. Columbia University.
@@ -628,26 +649,34 @@ models. arXiv:2603.18908v1. Columbia University.
 Huh, M., Cheung, B., Wang, T., & Isola, P. (2024). Position: The
 Platonic Representation Hypothesis. Proceedings of the 41st
 International Conference on Machine Learning (ICML), Vol. 235,
-20617--20642.
+20617 to 20642.
 
 Kornblith, S., Norouzi, M., Lee, H., & Hinton, G. (2019). Similarity of
 neural network representations revisited. International Conference on
-Machine Learning, 3519--3529.
+Machine Learning, 3519 to 3529.
 
 Roeder, G., Wu, Y., Duvenaud, D., & Grosse, R. (2020). On linear
 identifiability of learned representations. arXiv:2007.00810.
 
 **Appendix A: Live Resources**
 
-Rosetta v2.1: https://axlprotocol.org/rosetta
+Rosetta v3 (current): https://axlprotocol.org/v3
 
-Rosetta v1.1 (archived): https://axlprotocol.org/rosetta/v1
+Rosetta v2.2: https://axlprotocol.org/rosetta/v2.2
+
+Rosetta v2.1: https://axlprotocol.org/rosetta/v2.1
+
+Rosetta v1.1: https://axlprotocol.org/rosetta/v1
 
 Landing page: https://axlprotocol.org
 
 Experiment data: https://github.com/axlprotocol/axl-battlegrounds
 
 Sophon observer: https://github.com/axlprotocol/axl-sophon
+
+Bridge: https://bridge.axlprotocol.org
+
+Evolution narrative: https://lang.axlprotocol.org
 
 Source code: https://github.com/axlprotocol/axl-core
 
@@ -695,7 +724,7 @@ zero prior exposure.*
 Tokenizer: cl100k_base (GPT-4 / Claude). Vocabulary: 77/77 symbols
 verified as single BPE tokens. Subject tags: all six prefix characters
 (\$, @, #, !, \~, \^) verified as single tokens. Operation codes: all
-seven (OBS, INF, CON, MRG, SEK, YLD, PRD) verified as 1--2 tokens each.
+seven (OBS, INF, CON, MRG, SEK, YLD, PRD) verified as 1 to 2 tokens each.
 
 **Appendix E: Experiment Progression**
 
@@ -715,6 +744,6 @@ seven (OBS, INF, CON, MRG, SEK, YLD, PRD) verified as 1--2 tokens each.
 *Table E1. Each version addressed a specific failure mode discovered in
 the previous experiment.*
 
-AXL Protocol · v2.3 · March 2026
+AXL Protocol · v2.4 · March 2026
 
 https://axlprotocol.org
