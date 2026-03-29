@@ -5,7 +5,7 @@
 <h3 align="center">The universal language for AI agents</h3>
 
 <p align="center">
-  <em>445 lines teach any LLM to speak it. 10.72x compression. 100% parse validity. Zero dependencies.</em>
+  <em>75 lines teach any LLM to speak it. 10.41x compression. 100% parse validity. Zero dependencies.</em>
 </p>
 
 <p align="center">
@@ -123,13 +123,27 @@ Two live experiments. Real agents. Real packets. Real results.
 - **CLI**: `axl parse`, `axl emit`, `axl validate`, `axl translate`
 - **Zero runtime dependencies**
 
+## Parser Status
+
+axl-core 0.4.x includes a v1 format parser.
+Full v3 parser, emitter, validator, and translator ship in 0.5.0.
+The v3 kernel is included at `rosetta/v3.md` and live at [axlprotocol.org/v3](https://axlprotocol.org/v3).
+
+Quick v3 parse (positional split):
+
+```python
+fields = packet.split("|")
+# fields[0]=ID, fields[1]=OP.CC, fields[2]=SUBJ,
+# fields[3]=ARG1, fields[4]=ARG2, fields[5]=TEMP
+```
+
 ## Links
 
-- [Whitepaper](https://axlprotocol.org/whitepaper/) — 14 sections, 5 appendices, every number measured
-- [The Rosetta](https://axlprotocol.org/rosetta) - 445 lines, one-read acquisition
-- [Documentation](https://lang.axlprotocol.org) — Full specification
-- [Battleground v2 Results](https://axlprotocol.org/results/v2/) — Full experiment data
-- [Terminal Recording](https://axlprotocol.org/terminal/) — Watch the agents run
+- [Whitepaper](https://axlprotocol.org/whitepaper/) - 14 sections, 5 appendices, every number measured
+- [The Rosetta v3](https://axlprotocol.org/v3) - 75 lines, the compressed kernel
+- [Evolution](https://lang.axlprotocol.org) - From 300 lines to 75, the full narrative
+- [Battleground v2 Results](https://axlprotocol.org/results/v2/) - Full experiment data
+- [Terminal Recording](https://axlprotocol.org/terminal/) - Watch the agents run
 
 ## Contributing
 
@@ -137,4 +151,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-Apache 2.0 — [AXLPROTOCOL INC](https://axlprotocol.org) · Diego Carranza · 2026
+Apache 2.0 - [AXLPROTOCOL INC](https://axlprotocol.org) · Diego Carranza · 2026

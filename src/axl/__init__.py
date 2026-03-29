@@ -4,7 +4,7 @@ A universal communication protocol for agents and autonomous machines.
 https://axlprotocol.org
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 from axl.emitter import emit
 from axl.models import (
