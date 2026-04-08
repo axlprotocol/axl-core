@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "axl-core"
-version = "0.5.0"
-description = "AXL Protocol v3: Compressed semantic protocol for agent reasoning"
+version = "0.6.0"
+description = "AXL Protocol v3: Compressed semantic protocol for agent reasoning. Deterministic English-to-AXL compression."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
+dependencies = ["spacy>=3.7"]
 authors = [{name = "Diego Carranza", email = "admin@axlprotocol.org"}]
 classifiers = [
     "Development Status :: 3 - Alpha",
