@@ -367,17 +367,56 @@ def english_to_v3(
     return packets
 
 
-def compress(text: str, agent_id: str = "COMPRESS") -> str:
-    """Compress English text to AXL v3 packet string.
+# ── Rosetta kernel cache ───────────────────────────────
 
-    Convenience function. Returns newline-separated packets.
+_KERNEL_CACHE = {"text": None}
+
+def _load_kernel() -> str:
+    """Load and cache the Rosetta v3 kernel."""
+    if _KERNEL_CACHE["text"]:
+        return _KERNEL_CACHE["text"]
+    # Try local file first
+    import os
+    local_paths = [
+        "/var/www/axlprotocol/v3",
+        os.path.join(os.path.dirname(__file__), "..", "..", "rosetta", "v3.md"),
+    ]
+    for path in local_paths:
+        try:
+            with open(path) as f:
+                _KERNEL_CACHE["text"] = f.read()
+                return _KERNEL_CACHE["text"]
+        except (FileNotFoundError, PermissionError):
+            continue
+    # Fallback: fetch from URL
+    try:
+        import urllib.request
+        with urllib.request.urlopen("https://axlprotocol.org/v3", timeout=5) as resp:
+            _KERNEL_CACHE["text"] = resp.read().decode("utf-8")
+            return _KERNEL_CACHE["text"]
+    except Exception:
+        return ""
+
+
+def compress(text: str, agent_id: str = "COMPRESS", include_kernel: bool = True) -> str:
+    """Compress English text to self-bootstrapping AXL v3 output.
+
+    The output starts with the Rosetta v3 kernel, then the packets.
+    Any LLM that receives this output can parse it immediately.
 
     Args:
         text: English prose
         agent_id: Agent ID
+        include_kernel: If True, prepend the Rosetta v3 kernel
 
     Returns:
-        Newline-separated AXL v3 packets
+        Self-bootstrapping AXL output (kernel + packets)
     """
     packets = english_to_v3(text, agent_id)
-    return "\n".join(emit_v3(p) for p in packets)
+    packet_lines = "\n".join(emit_v3(p) for p in packets)
+
+    if include_kernel:
+        kernel = _load_kernel()
+        if kernel:
+            return kernel + "\n\n---PACKETS---\n" + packet_lines
+    return packet_lines
