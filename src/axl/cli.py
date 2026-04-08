@@ -118,6 +118,20 @@ def _do_emit(args: argparse.Namespace) -> None:
     print(emit(packet))
 
 
+def _do_decompress(args: argparse.Namespace) -> None:
+    from axl.decompressor import v3_to_english, format_decompressed, decompress
+
+    with open(args.file) as f:
+        text = f.read()
+
+    if args.raw:
+        claims = v3_to_english(text)
+        for c in claims:
+            print(f"[{c['op']}.{c['cc']}] {c['claim_text']}")
+    else:
+        print(decompress(text))
+
+
 def _do_version(_args: argparse.Namespace) -> None:
     from axl import __version__
 
@@ -161,6 +175,12 @@ def main() -> None:
     p_emit.add_argument("--signature", default=None, help="Signature for payment proof")
     p_emit.add_argument("--gas", default=None, help="Gas fee for payment proof")
     p_emit.set_defaults(func=_do_emit)
+
+    # ── decompress ──
+    p_decompress = subparsers.add_parser("decompress", help="Decompress AXL packets to English")
+    p_decompress.add_argument("file", help="File containing AXL packets (use /dev/stdin for pipe)")
+    p_decompress.add_argument("--raw", action="store_true", help="Print raw claims without grouping")
+    p_decompress.set_defaults(func=_do_decompress)
 
     # ── version ──
     p_version = subparsers.add_parser("version", help="Print version")

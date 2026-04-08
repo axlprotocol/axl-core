@@ -1,3 +1,10 @@
+## 0.7.0 (2026-04-08)
+
+- Deterministic decompressor: v3_to_english, format_decompressed, parse_packet, strip_kernel
+- Receipt mode decompression with no LLM dependency
+- CLI: `axl decompress <file>` and `axl decompress --raw <file>`
+- No PyPI publish (local only)
+
 ## 0.5.0 (2026-03-29)
 
 - Full v3 parser, emitter, validator, translator
