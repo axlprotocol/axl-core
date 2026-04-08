@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "axl-core"
-version = "0.6.0"
+version = "0.6.1"
 description = "AXL Protocol v3: Compressed semantic protocol for agent reasoning. Deterministic English-to-AXL compression."
 readme = "README.md"
 license = {text = "Apache-2.0"}
