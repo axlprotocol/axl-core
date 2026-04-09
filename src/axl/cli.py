@@ -16,7 +16,7 @@ def _do_parse(args: argparse.Namespace) -> None:
     version = detect_version(args.packet)
     if version == "v3":
         pkt = parse_v3(args.packet)
-        print(f"Version: v3")
+        print("Version: v3")
         print(f"ID     : {pkt.id}")
         print(f"Op     : {pkt.operation.value}.{pkt.confidence:02d}")
         print(f"Subject: {pkt.subject_tag.value}{pkt.subject_value}")
@@ -29,7 +29,7 @@ def _do_parse(args: argparse.Namespace) -> None:
             print(f"Meta   : {pkt.meta}")
     else:
         packet = parse(args.packet)
-        print(f"Version: v1")
+        print("Version: v1")
         print(f"Domain : {packet.domain}")
         print(f"Tier   : {packet.tier}")
         if packet.agent_id:
@@ -119,7 +119,7 @@ def _do_emit(args: argparse.Namespace) -> None:
 
 
 def _do_decompress(args: argparse.Namespace) -> None:
-    from axl.decompressor import v3_to_english, format_decompressed, decompress
+    from axl.decompressor import decompress, v3_to_english
 
     with open(args.file) as f:
         text = f.read()
@@ -179,7 +179,9 @@ def main() -> None:
     # ── decompress ──
     p_decompress = subparsers.add_parser("decompress", help="Decompress AXL packets to English")
     p_decompress.add_argument("file", help="File containing AXL packets (use /dev/stdin for pipe)")
-    p_decompress.add_argument("--raw", action="store_true", help="Print raw claims without grouping")
+    p_decompress.add_argument(
+        "--raw", action="store_true", help="Print raw claims without grouping"
+    )
     p_decompress.set_defaults(func=_do_decompress)
 
     # ── version ──

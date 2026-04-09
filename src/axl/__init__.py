@@ -7,7 +7,8 @@ https://axlprotocol.org
 __version__ = "0.8.0"
 
 from axl.compressor import compress, english_to_v3
-from axl.decompressor import decompress, v3_to_english as decompress_to_claims, format_decompressed, parse_packet, strip_kernel
+from axl.decompressor import decompress, format_decompressed, parse_packet, strip_kernel
+from axl.decompressor import v3_to_english as decompress_to_claims
 from axl.emitter import emit, emit_v3, v3_from_json, v3_to_json
 from axl.models import (
     FLAGS,

@@ -1,6 +1,11 @@
 """Tests for the AXL decompressor."""
-import pytest
-from axl.decompressor import parse_packet, strip_kernel, v3_to_english, format_decompressed, decompress
+from axl.decompressor import (
+    decompress,
+    format_decompressed,
+    parse_packet,
+    strip_kernel,
+    v3_to_english,
+)
 
 
 def test_parse_obs_packet():
@@ -37,7 +42,11 @@ def test_parse_malformed():
 
 
 def test_v3_to_english_basic():
-    text = 'ID:a|OBS.95|$.BTC|^67420|NOW\nID:b|INF.80|@market|<-funding|~bullish|4H\nID:c|PRD.70|$.BTC|^69200|NOW'
+    text = (
+        'ID:a|OBS.95|$.BTC|^67420|NOW'
+        '\nID:b|INF.80|@market|<-funding|~bullish|4H'
+        '\nID:c|PRD.70|$.BTC|^69200|NOW'
+    )
     claims = v3_to_english(text)
     assert len(claims) == 3
     assert claims[0]['op'] == 'OBS'
@@ -47,8 +56,14 @@ def test_v3_to_english_basic():
 
 def test_format_grouped():
     claims = [
-        {'op': 'OBS', 'cc': 95, 'tag': '$', 'tag_value': 'BTC', 'base_subject': 'BTC', 'aspect': None, 'claim_text': 'BTC is 67420 (95%)', 'temp': 'NOW', 'raw': ''},
-        {'op': 'OBS', 'cc': 90, 'tag': '@', 'tag_value': 'market', 'base_subject': 'market', 'aspect': None, 'claim_text': 'market is active (90%)', 'temp': 'NOW', 'raw': ''},
+        {
+            'op': 'OBS', 'cc': 95, 'tag': '$', 'tag_value': 'BTC', 'base_subject': 'BTC',
+            'aspect': None, 'claim_text': 'BTC is 67420 (95%)', 'temp': 'NOW', 'raw': '',
+        },
+        {
+            'op': 'OBS', 'cc': 90, 'tag': '@', 'tag_value': 'market', 'base_subject': 'market',
+            'aspect': None, 'claim_text': 'market is active (90%)', 'temp': 'NOW', 'raw': '',
+        },
     ]
     result = format_decompressed(claims)
     assert 'BTC' in result

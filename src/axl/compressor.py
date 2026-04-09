@@ -22,9 +22,8 @@ from typing import Iterable, Optional
 
 import spacy
 
-from axl.models import Operation, TagType, V3Packet
 from axl.emitter import emit_v3
-
+from axl.models import Operation, TagType, V3Packet
 
 # -- spaCy singleton ---------------------------------------------------------
 
@@ -503,7 +502,9 @@ _ROLE_STOPWORDS = {
 
 def _is_pronoun_like(text: str) -> bool:
     stripped = text.strip().lower()
-    return stripped in _PRONOUNS or bool(re.fullmatch(r"(?:i|you|we|they|he|she|it|this|that)", stripped))
+    return stripped in _PRONOUNS or bool(
+        re.fullmatch(r"(?:i|you|we|they|he|she|it|this|that)", stripped)
+    )
 
 
 def _is_weak_subject(text: str) -> bool:
@@ -630,7 +631,9 @@ def extract_subject(
     # Fallback tokens.
     if not best:
         for tok in doc:
-            if tok.pos_ in ("PROPN", "NOUN") and not tok.like_num and not _is_pronoun_like(tok.text):
+            if (tok.pos_ in ("PROPN", "NOUN")
+                    and not tok.like_num
+                    and not _is_pronoun_like(tok.text)):
                 tag, _ = classify_tag(tok.text)
                 clean = _clean_token_value(tok.text, max_len=30, keep=".-")
                 if clean:
@@ -683,7 +686,9 @@ def infer_role_label(ent, doc) -> Optional[str]:
         candidates.append((score, tok.text))
 
     head = ent.root.head
-    if head.pos_ in ("NOUN", "PROPN") and head.lemma_.lower() not in _ROLE_STOPWORDS and not head.like_num:
+    if (head.pos_ in ("NOUN", "PROPN")
+            and head.lemma_.lower() not in _ROLE_STOPWORDS
+            and not head.like_num):
         candidates.append((28, head.text))
 
     if not candidates:
@@ -829,9 +834,14 @@ def english_to_v3(text: str, agent_id: str = "COMPRESS") -> list[V3Packet]:
         operation = classify_operation(sent_text)
 
         has_nums = bool(
-            sent_doc.ents and any(e.label_ in ("MONEY", "QUANTITY", "CARDINAL", "PERCENT", "DATE") for e in sent_doc.ents)
+            sent_doc.ents and any(
+                e.label_ in ("MONEY", "QUANTITY", "CARDINAL", "PERCENT", "DATE")
+                for e in sent_doc.ents
+            )
         )
-        has_ents = bool(sent_doc.ents and any(e.label_ in ("PERSON", "ORG", "GPE") for e in sent_doc.ents))
+        has_ents = bool(
+            sent_doc.ents and any(e.label_ in ("PERSON", "ORG", "GPE") for e in sent_doc.ents)
+        )
         confidence = score_confidence(sent_text, operation, has_nums, has_ents)
 
         tag_type, subject_value = extract_subject(sent_doc, sent_text, operation, context_subject)
@@ -892,7 +902,9 @@ def english_to_v3(text: str, agent_id: str = "COMPRESS") -> list[V3Packet]:
     if packets:
         has_entities = any(p.subject_tag == TagType.ENTITY for p in packets)
         has_numbers = any(p.arg2 and "^" in (p.arg2 or "") for p in packets)
-        has_causality = any(p.arg1 and ("<-" in (p.arg1 or "") or "RE:" in (p.arg1 or "")) for p in packets)
+        has_causality = any(
+            p.arg1 and ("<-" in (p.arg1 or "") or "RE:" in (p.arg1 or "")) for p in packets
+        )
         has_confidence = True
         has_temporal = any(
             p.temporal != "NOW" or (p.arg2 and "^date:" in p.arg2)

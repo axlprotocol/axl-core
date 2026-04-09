@@ -13,7 +13,6 @@ import re
 from collections import defaultdict
 from typing import Optional
 
-
 TAG_NAMES = {
     "$": "Financial",
     "@": "Entity",
@@ -247,7 +246,10 @@ def format_decompressed(claims: list[dict]) -> str:
 
     groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for claim in claims:
-        key = (claim.get("tag", "^"), claim.get("base_subject") or claim.get("tag_value") or "unknown")
+        key = (
+            claim.get("tag", "^"),
+            claim.get("base_subject") or claim.get("tag_value") or "unknown",
+        )
         groups[key].append(claim)
 
     for key in groups:

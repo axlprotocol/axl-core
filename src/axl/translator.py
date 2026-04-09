@@ -367,6 +367,8 @@ def v3_to_english(packet: V3Packet) -> str:
 
     if op == Operation.PRD:
         outcome = packet.arg2 or packet.arg1 or subj
-        return f"{agent} predicts {subj} at {outcome} within {packet.temporal} with {cc}% confidence."
+        return (
+            f"{agent} predicts {subj} at {outcome} within {packet.temporal} with {cc}% confidence."
+        )
 
     return f"{agent}: {op.value}.{cc} {subj}"

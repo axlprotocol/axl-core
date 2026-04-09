@@ -5,7 +5,7 @@ Zero external dependencies. Uses only stdlib + axl.models + axl.schemas.
 
 from __future__ import annotations
 
-from axl.models import Operation, Packet, ValidationResult, ValidationWarning, V3Packet
+from axl.models import Operation, Packet, V3Packet, ValidationResult, ValidationWarning
 from axl.schemas import (
     SCHEMAS,
     VALID_ACTIONS,
