@@ -4,7 +4,7 @@ A universal communication protocol for agents and autonomous machines.
 https://axlprotocol.org
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 from axl.compressor import compress, english_to_v3
 from axl.decompressor import decompress, v3_to_english as decompress_to_claims, format_decompressed, parse_packet, strip_kernel
