@@ -1,47 +1,84 @@
-"""AXL Decompressor: Deterministic packet-to-English pipeline.
+"""AXL Decompressor v0.8.0
 
-No LLM dependency. Parses AXL v3 packets and produces structured English.
-
-Functions:
-- parse_packet(line) -> dict or None
-- strip_kernel(text) -> str (packets only)
-- v3_to_english(packets_text) -> list[dict]
-- format_decompressed(claims) -> str
-- decompress(text) -> str (convenience: strip + parse + format)
+Focused fixes for the v3 round-trip failures:
+- parse single `^key:value` ARG2 values positionally instead of swallowing them as META
+- parse trailing bracketed META separately without confusing it with ARG1/ARG2
+- group claims by full subject/base subject rather than by tag alone
+- render dotted hierarchical subjects (`company.revenue`) as sections + bullets
 """
 
 from __future__ import annotations
+
 import re
+from collections import defaultdict
 from typing import Optional
 
 
-# Tag type display names
 TAG_NAMES = {
-    '$': 'Financial',
-    '@': 'Entity',
-    '#': 'Metric',
-    '!': 'Event',
-    '~': 'State',
-    '^': 'Value',
+    "$": "Financial",
+    "@": "Entity",
+    "#": "Metric",
+    "!": "Event",
+    "~": "State",
+    "^": "Value",
 }
 
-# Operation templates for Step 1 (packet to claim)
-OP_TEMPLATES = {
-    'OBS': '{value} has {arg2} ({cc}% confidence)',
-    'INF': 'Based on {arg1}, {value} {arg2} ({cc}% confidence)',
-    'CON': '{value} contradicts {arg1}: {arg2} ({cc}% confidence)',
-    'MRG': 'Synthesizing {arg1}: {value} {arg2} ({cc}% confidence)',
-    'SEK': 'Information needed: {value} {arg2}',
-    'YLD': '{value} changed: {arg2} because {arg1} ({cc}% confidence)',
-    'PRD': '{value} predicted: {arg2} within {temp} ({cc}% confidence)',
-}
+VALID_TEMPS = {"NOW", "1H", "4H", "1D", "1W", "1M", "HIST"}
+
+
+def _humanize_token(text: str) -> str:
+    return text.replace("_", " ").strip()
+
+
+def _subject_parts(tag_value: str) -> tuple[str, Optional[str]]:
+    if "." not in tag_value:
+        return _humanize_token(tag_value), None
+    base, aspect = tag_value.split(".", 1)
+    return _humanize_token(base), _humanize_token(aspect)
+
+
+def _clean_arg(arg: Optional[str]) -> str:
+    if not arg:
+        return ""
+
+    arg = re.sub(r"^<-@", "according to ", arg)
+    arg = re.sub(r"^<-", "because ", arg)
+    arg = re.sub(r"^RE:", "references ", arg)
+
+    parts = [p.strip() for p in arg.split("+") if p.strip()]
+    expanded: list[str] = []
+    for part in parts:
+        clean_part = re.sub(r"^[\^~\$@#!]", "", part)
+        if ":" in clean_part:
+            key, val = clean_part.split(":", 1)
+            key = _humanize_token(key)
+            val = _humanize_token(val)
+            if "=" in val:
+                role, actual = val.split("=", 1)
+                expanded.append(f"{_humanize_token(role)} {actual}")
+            else:
+                expanded.append(f"{key}: {val}")
+        else:
+            expanded.append(_humanize_token(clean_part))
+    return ", ".join(expanded).strip()
+
+
+def _extract_meta(line: str) -> tuple[str, dict[str, str]]:
+    meta: dict[str, str] = {}
+
+    def repl(match: re.Match[str]) -> str:
+        meta[match.group(1)] = match.group(2)
+        return ""
+
+    stripped = re.sub(r"\s*\[\^(\w+):([^\]]+)\]", repl, line).strip()
+    return stripped, meta
 
 
 def parse_packet(line: str) -> Optional[dict]:
-    """Parse a single AXL v3 packet line into a dict.
+    """Parse a single AXL v3 packet line.
 
-    Returns dict with keys: id, op, cc, tag, tag_value, arg1, arg2, temp, meta
-    Returns None if the line is not a valid packet.
+    Important v0.8.0 fix: parsing is now positional first. A field like
+    `^pct:30%` is preserved as ARG2 if it appears in ARG2 position.
     """
     if not line or not isinstance(line, str):
         return None
@@ -51,262 +88,188 @@ def parse_packet(line: str) -> Optional[dict]:
         return None
 
     try:
-        parts = line.split('|')
+        line_no_meta, meta = _extract_meta(line)
+        parts = [p.strip() for p in line_no_meta.split("|")]
         if len(parts) < 3:
             return None
 
-        # Field 0: ID
-        raw_id = parts[0].strip()
-        if raw_id.startswith('ID:'):
+        raw_id = parts[0]
+        if raw_id.startswith("ID:"):
             raw_id = raw_id[3:]
         agent_id = raw_id
 
-        # Field 1: OP.CC
-        op_cc = parts[1].strip()
-        dot = op_cc.find('.')
+        op_cc = parts[1]
+        dot = op_cc.find(".")
         if dot < 0:
             return None
         op = op_cc[:dot].upper()
-        if op not in ('OBS', 'INF', 'CON', 'MRG', 'SEK', 'YLD', 'PRD'):
+        if op not in ("OBS", "INF", "CON", "MRG", "SEK", "YLD", "PRD"):
             return None
         try:
-            cc = int(op_cc[dot + 1:])
+            cc = int(op_cc[dot + 1 :])
         except ValueError:
             cc = 50
 
-        # Field 2: SUBJ (TAG.value)
-        subj = parts[2].strip() if len(parts) > 2 else ''
-        tag = '^'  # default
+        subj = parts[2] if len(parts) > 2 else ""
+        tag = "^"
         tag_value = subj
         if subj and subj[0] in TAG_NAMES:
             tag = subj[0]
-            tag_value = subj[1:].lstrip('.')
+            tag_value = subj[1:].lstrip(".")
+        tag_value = tag_value.strip()
 
-        # Clean tag value: replace underscores with spaces
-        tag_value = tag_value.replace('_', ' ').strip()
+        remaining = parts[3:]
+        temp = "NOW"
+        if remaining and remaining[-1] in VALID_TEMPS:
+            temp = remaining.pop()
 
-        # Remaining fields: ARG1, ARG2, TEMP, META
-        # Scan remaining parts, identify temporal and meta
-        remaining = [p.strip() for p in parts[3:]]
+        arg1 = remaining[0] if len(remaining) >= 1 else None
+        arg2 = remaining[1] if len(remaining) >= 2 else None
+        if len(remaining) > 2:
+            tail = [p for p in remaining[1:] if p]
+            arg2 = "|".join(tail) if tail else arg2
 
-        VALID_TEMPS = {'NOW', '1H', '4H', '1D', '1W', '1M', 'HIST'}
-
-        arg1 = None
-        arg2 = None
-        temp = 'NOW'
-        meta = {}
-
-        positional = []
-        for field in remaining:
-            # Check if it's a meta field (^key:value with no + compound)
-            if field.startswith('^') and ':' in field[1:] and '+' not in field and len(field.split(':')[0]) < 12:
-                # Could be meta or a value arg
-                # If it looks like a standalone key:value pair, treat as meta
-                bracket_match = re.match(r'\[?\^(\w+):(.+?)\]?$', field)
-                if bracket_match:
-                    meta[bracket_match.group(1)] = bracket_match.group(2)
-                    continue
-
-            # Check if it's a temporal
-            if field in VALID_TEMPS:
-                temp = field
-                continue
-
-            positional.append(field)
-
-        if len(positional) >= 1:
-            arg1 = positional[0]
-        if len(positional) >= 2:
-            arg2 = positional[1]
-        if len(positional) > 2:
-            # Extra positional fields, join into arg2
-            arg2 = '|'.join(positional[1:])
-
-        # Clean args: expand labeled values for natural English
-        def clean_arg(a):
-            if not a:
-                return ''
-            a = re.sub(r'^<-', '', a)
-            a = re.sub(r'^RE:', 'references ', a)
-            # Expand labeled values: ^key:value or ~key:value
-            parts = a.split('+')
-            expanded = []
-            for part in parts:
-                part = part.strip()
-                # Remove tag prefixes for display
-                clean_part = re.sub(r'^[\^~\$@#!]', '', part)
-                if ':' in clean_part:
-                    key, val = clean_part.split(':', 1)
-                    key = key.replace('_', ' ')
-                    val = val.replace('_', ' ')
-                    expanded.append(f"{key}: {val}")
-                else:
-                    clean_part = clean_part.replace('_', ' ')
-                    expanded.append(clean_part)
-            return ', '.join(expanded).strip()
+        base_subject, aspect = _subject_parts(tag_value)
 
         return {
-            'id': agent_id,
-            'op': op,
-            'cc': cc,
-            'tag': tag,
-            'tag_value': tag_value,
-            'arg1': clean_arg(arg1),
-            'arg2': clean_arg(arg2),
-            'temp': temp,
-            'meta': meta,
-            'raw': line,
+            "id": agent_id,
+            "op": op,
+            "cc": cc,
+            "tag": tag,
+            "tag_value": _humanize_token(tag_value),
+            "base_subject": base_subject,
+            "aspect": aspect,
+            "arg1": _clean_arg(arg1),
+            "arg2": _clean_arg(arg2),
+            "temp": temp,
+            "meta": meta,
+            "raw": line,
         }
-
     except Exception:
         return None
 
 
 def strip_kernel(text: str) -> str:
-    """Strip the Rosetta v3 kernel from compressed output, returning only packets.
-
-    Handles:
-    - Text with ---PACKETS--- marker
-    - Text starting with DIRECTIVE: or AXL v3
-    - Raw packets (returned as-is)
-    """
     if not text or not isinstance(text, str):
-        return ''
+        return ""
 
-    # Check for ---PACKETS--- marker
-    marker = '---PACKETS---'
+    marker = "---PACKETS---"
     idx = text.find(marker)
     if idx >= 0:
-        return text[idx + len(marker):].strip()
+        return text[idx + len(marker) :].strip()
 
-    # Check for DIRECTIVE or AXL v3 header, find first packet line
-    lines = text.split('\n')
+    lines = text.split("\n")
     for i, line in enumerate(lines):
         line = line.strip()
-        if line.startswith('ID:') and '|' in line:
-            return '\n'.join(lines[i:])
+        if not line:
+            continue
+        if "|" in line and re.search(r"\b(?:OBS|INF|CON|MRG|SEK|YLD|PRD)\.\d{2}\b", line):
+            return "\n".join(lines[i:]).strip()
 
-    # Return as-is (assume raw packets)
     return text.strip()
 
 
+def _claim_text(parsed: dict) -> str:
+    label = parsed["aspect"] or parsed["base_subject"] or "unknown"
+    arg1 = parsed["arg1"]
+    arg2 = parsed["arg2"]
+    cc = parsed["cc"]
+    temp = parsed["temp"]
+    op = parsed["op"]
+
+    if op == "OBS":
+        core = arg2 or arg1 or "noted"
+        return f"{label}: {core} ({cc}% confidence)"
+    if op == "INF":
+        if arg1 and arg2:
+            return f"{label}: {arg2}; based on {arg1} ({cc}% confidence)"
+        if arg1:
+            return f"{label}: based on {arg1} ({cc}% confidence)"
+        return f"{label}: inferred {arg2 or ''} ({cc}% confidence)".strip()
+    if op == "CON":
+        if arg1 and arg2:
+            return f"{label}: contradicts {arg1}; {arg2} ({cc}% confidence)"
+        return f"{label}: contradiction noted ({cc}% confidence)"
+    if op == "MRG":
+        detail = arg2 or arg1 or "synthesis"
+        return f"{label}: synthesis of {detail} ({cc}% confidence)"
+    if op == "SEK":
+        detail = arg2 or arg1 or "information requested"
+        return f"{label}: {detail}"
+    if op == "YLD":
+        detail = arg2 or "belief updated"
+        if arg1:
+            return f"{label}: {detail}; because {arg1} ({cc}% confidence)"
+        return f"{label}: {detail} ({cc}% confidence)"
+    if op == "PRD":
+        detail = arg2 or arg1 or "prediction"
+        if temp != "NOW":
+            return f"{label}: {detail}; within {temp} ({cc}% confidence)"
+        return f"{label}: {detail} ({cc}% confidence)"
+    return f"{label}: {arg2 or arg1 or 'noted'} ({cc}% confidence)"
+
+
 def v3_to_english(packets_text: str) -> list[dict]:
-    """Convert AXL v3 packets to English claims.
-
-    Step 1 of the decompression pipeline: each packet becomes one claim.
-
-    Args:
-        packets_text: Raw packet text (may include kernel, will be stripped)
-
-    Returns:
-        List of claim dicts with keys: op, cc, tag, value, claim_text, temp, raw
-    """
     text = strip_kernel(packets_text)
     if not text:
         return []
 
     claims = []
-    for line in text.split('\n'):
+    for line in text.split("\n"):
         line = line.strip()
         if not line:
             continue
-
         parsed = parse_packet(line)
         if not parsed:
             continue
-
-        # Apply template
-        template = OP_TEMPLATES.get(parsed['op'], '{value} {arg2} ({cc}% confidence)')
-
-        try:
-            claim_text = template.format(
-                value=parsed['tag_value'] or 'unknown',
-                arg1=parsed['arg1'] or '',
-                arg2=parsed['arg2'] or '',
-                cc=parsed['cc'],
-                temp=parsed['temp'],
-            )
-        except (KeyError, IndexError):
-            claim_text = f"{parsed['tag_value']} ({parsed['cc']}% confidence)"
-
-        # Clean up empty parts
-        claim_text = re.sub(r'\s+', ' ', claim_text).strip()
-        claim_text = claim_text.replace('  ', ' ')
-        claim_text = claim_text.replace('has  (', 'noted (')
-        claim_text = claim_text.replace('contradicts :', 'contradicts:')
-        claim_text = claim_text.replace('Synthesizing :', 'Synthesis:')
-        claim_text = claim_text.replace('changed:  because', 'changed because')
-        claim_text = claim_text.replace('predicted:  within', 'predicted within')
-
-        claims.append({
-            'op': parsed['op'],
-            'cc': parsed['cc'],
-            'tag': parsed['tag'],
-            'tag_value': parsed['tag_value'],
-            'claim_text': claim_text,
-            'temp': parsed['temp'],
-            'raw': parsed['raw'],
-        })
-
+        claim_text = _claim_text(parsed)
+        claim_text = re.sub(r"\s+", " ", claim_text).strip()
+        claims.append(
+            {
+                "op": parsed["op"],
+                "cc": parsed["cc"],
+                "tag": parsed["tag"],
+                "tag_value": parsed["tag_value"],
+                "base_subject": parsed["base_subject"],
+                "aspect": parsed["aspect"],
+                "claim_text": claim_text,
+                "temp": parsed["temp"],
+                "raw": parsed["raw"],
+            }
+        )
     return claims
 
 
 def format_decompressed(claims: list[dict]) -> str:
-    """Format claims into grouped, structured English.
-
-    Step 2-3 of the decompression pipeline:
-    - Group by tag type
-    - Sort by confidence descending
-    - Format as readable sections
-    """
+    """Group by semantic subject, not by tag alone."""
     if not claims:
-        return 'No valid packets found.'
+        return "No valid packets found."
 
-    # Group by tag
-    groups = {}
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for claim in claims:
-        tag = claim.get('tag', '^')
-        if tag not in groups:
-            groups[tag] = []
-        groups[tag].append(claim)
+        key = (claim.get("tag", "^"), claim.get("base_subject") or claim.get("tag_value") or "unknown")
+        groups[key].append(claim)
 
-    # Sort each group by confidence descending
-    for tag in groups:
-        groups[tag].sort(key=lambda x: x.get('cc', 0), reverse=True)
+    for key in groups:
+        groups[key].sort(key=lambda x: x.get("cc", 0), reverse=True)
 
-    # Format
+    tag_order = ["@", "$", "#", "!", "~", "^"]
+
+    def section_sort_key(item: tuple[tuple[str, str], list[dict]]):
+        (tag, base_subject), section_claims = item
+        tag_rank = tag_order.index(tag) if tag in tag_order else len(tag_order)
+        best_cc = max((c.get("cc", 0) for c in section_claims), default=0)
+        return (tag_rank, -best_cc, base_subject.lower())
+
     sections = []
+    for (tag, base_subject), section_claims in sorted(groups.items(), key=section_sort_key):
+        header = base_subject or TAG_NAMES.get(tag, "Other")
+        lines = [f"  - {claim['claim_text']}" for claim in section_claims]
+        sections.append(f"[{header}]\n" + "\n".join(lines))
 
-    # Order: @ entity first, $ financial, # metric, ! event, ~ state, ^ value
-    tag_order = ['@', '$', '#', '!', '~', '^']
-
-    for tag in tag_order:
-        if tag not in groups:
-            continue
-        name = TAG_NAMES.get(tag, 'Other')
-        lines = []
-        for claim in groups[tag]:
-            lines.append(f"  - {claim['claim_text']}")
-        sections.append(f"[{name}]\n" + '\n'.join(lines))
-
-    # Any tags not in our order
-    for tag in groups:
-        if tag not in tag_order:
-            name = TAG_NAMES.get(tag, 'Other')
-            lines = [f"  - {c['claim_text']}" for c in groups[tag]]
-            sections.append(f"[{name}]\n" + '\n'.join(lines))
-
-    return '\n\n'.join(sections)
+    return "\n\n".join(sections)
 
 
 def decompress(text: str) -> str:
-    """Convenience function: strip kernel, parse packets, format output.
-
-    Args:
-        text: Raw compressed output (may include kernel + packets)
-
-    Returns:
-        Formatted English text grouped by subject tag
-    """
     claims = v3_to_english(text)
     return format_decompressed(claims)

@@ -1,41 +1,35 @@
-"""AXL Compressor: Deterministic English-to-AXL v3 pipeline.
+"""AXL Compressor v0.8.0
 
-No LLM dependency. Uses spaCy NER + Rosetta grammar rules.
+Focused fixes for the known v3 extraction failures:
+- DATE/year guard before number compaction
+- word-scale number normalization ("5 million dollars" -> "5M")
+- pronoun and numeric subject suppression
+- semantic subject ranking (teams/orgs outrank numbers)
+- atomic fact splitting (one packet per value slot)
+- temporal/date duplication per atomic fact instead of flat unrelated ARG2 joins
+- safer evidence fallback (avoid treating generic prepositions like "by 2025" as causal)
+- disable invalid synthetic MRG packets
 
-Pipeline:
-1. Sentence splitting
-2. Entity extraction (NER -> tag types)
-3. Operation classification (OBS/INF/CON/MRG/SEK/YLD/PRD)
-4. Confidence scoring
-5. Temporal extraction
-6. Evidence linking
-7. Packet assembly
+This module keeps the current packet grammar intact. It only changes the compressor's
+heuristics so the output respects the existing 6-field contract more faithfully.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Optional
+from collections import defaultdict
+from typing import Iterable, Optional
 
 import spacy
-
-
-def _truncate_word(s: str, max_len: int) -> str:
-    """Truncate string at word boundary (underscore-delimited)."""
-    if len(s) <= max_len:
-        return s
-    truncated = s[:max_len]
-    last_space = truncated.rfind('_')
-    if last_space > max_len // 2:
-        return truncated[:last_space]
-    return truncated
 
 from axl.models import Operation, TagType, V3Packet
 from axl.emitter import emit_v3
 
-# Load spaCy model (lazy, singleton)
+
+# -- spaCy singleton ---------------------------------------------------------
+
 _nlp = None
+
 
 def _get_nlp():
     global _nlp
@@ -44,47 +38,187 @@ def _get_nlp():
     return _nlp
 
 
-# -- Tag classification ----------------------------------------
+# -- text normalization helpers ---------------------------------------------
 
-# Patterns for tag type detection
+
+def _truncate_word(s: str, max_len: int) -> str:
+    """Truncate at an underscore boundary where possible."""
+    if len(s) <= max_len:
+        return s
+    truncated = s[:max_len]
+    last_sep = truncated.rfind("_")
+    if last_sep > max_len // 2:
+        return truncated[:last_sep]
+    return truncated
+
+
+def _clean_token_value(text: str, max_len: int = 40, keep: str = ".%:+-") -> str:
+    """Normalize text to an AXL-safe token-ish value."""
+    pattern = rf"[^\w{re.escape(keep)}]+"
+    text = re.sub(pattern, "_", text.strip())
+    text = re.sub(r"_+", "_", text).strip("_")
+    return _truncate_word(text, max_len)
+
+
+def _strip_trailing_zero(num: float) -> str:
+    s = f"{num:.1f}"
+    if s.endswith(".0"):
+        return s[:-2]
+    return s
+
+
+def _human_scale(num: float) -> str:
+    if num >= 1_000_000_000:
+        return f"{_strip_trailing_zero(num / 1_000_000_000)}B"
+    if num >= 1_000_000:
+        return f"{_strip_trailing_zero(num / 1_000_000)}M"
+    if num >= 1_000:
+        return f"{_strip_trailing_zero(num / 1_000)}K"
+    return _strip_trailing_zero(num)
+
+
+def _looks_like_year(raw: str) -> bool:
+    raw = raw.strip()
+    return bool(re.fullmatch(r"(?:18|19|20|21)\d{2}", raw))
+
+
+_SCALE_SUFFIX = {
+    "thousand": "K",
+    "k": "K",
+    "million": "M",
+    "m": "M",
+    "billion": "B",
+    "b": "B",
+    "trillion": "T",
+    "t": "T",
+}
+
+
+def _normalize_scaled_phrase(text: str) -> Optional[str]:
+    m = re.search(
+        r"([-+]?\d[\d,]*(?:\.\d+)?)\s*(thousand|million|billion|trillion|k|m|b|t)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    num = float(m.group(1).replace(",", ""))
+    suffix = _SCALE_SUFFIX[m.group(2).lower()]
+    return f"{_strip_trailing_zero(num)}{suffix}"
+
+
+def normalize_entity_value(raw: str, ent_label: str) -> Optional[str]:
+    """Normalize an extracted entity without destroying dates or scale words."""
+    text = raw.strip()
+    if not text:
+        return None
+
+    # DATE/TIME: never compact years. Preserve quarter/year structures.
+    if ent_label in ("DATE", "TIME"):
+        q = re.search(r"\b(Q[1-4])\s+(20\d{2})\b", text, re.IGNORECASE)
+        if q:
+            return f"{q.group(1).upper()}_{q.group(2)}"
+        year = re.search(r"\b((?:18|19|20|21)\d{2})\b", text)
+        if year:
+            return year.group(1)
+        return _clean_token_value(text, max_len=24, keep=".-")
+
+    # Percents: preserve the percent sign if present.
+    if ent_label == "PERCENT":
+        m = re.search(r"([-+]?\d[\d,]*(?:\.\d+)?)\s*%", text)
+        if m:
+            return f"{m.group(1).replace(',', '')}%"
+        scaled = _normalize_scaled_phrase(text)
+        if scaled:
+            return scaled
+        return _clean_token_value(text.replace(",", ""), max_len=18, keep=".%+-")
+
+    # Monetary phrases: support word scales and currency words/symbols.
+    if ent_label == "MONEY":
+        scaled = _normalize_scaled_phrase(text)
+        if scaled:
+            return scaled
+        numeric = re.search(r"([-+]?\d[\d,]*(?:\.\d+)?)", text)
+        if numeric:
+            value = float(numeric.group(1).replace(",", ""))
+            return _human_scale(value)
+        return _clean_token_value(text, max_len=20)
+
+    # Generic cardinals/quantities: avoid compacting likely years.
+    scaled = _normalize_scaled_phrase(text)
+    if scaled:
+        return scaled
+
+    numeric_only = re.sub(r"[^\d.+-]", "", text)
+    if numeric_only:
+        if _looks_like_year(numeric_only):
+            return numeric_only
+        try:
+            value = float(numeric_only)
+            return _human_scale(value)
+        except ValueError:
+            pass
+
+    return _clean_token_value(text, max_len=20, keep=".%+-")
+
+
+# -- Tag classification ------------------------------------------------------
+
 _FINANCIAL_PATTERNS = re.compile(
-    r'\$|USD|USDC|BTC|ETH|SOL|price|cost|revenue|budget|fee|fund|rate|'
-    r'profit|loss|margin|earnings|valuation|salary|payment|invoice|debt|'
-    r'credit|debit|stock|equity|bond|yield|dividend|interest|inflation',
-    re.IGNORECASE
+    r"\$|USD|USDC|BTC|ETH|SOL|price|cost|revenue|budget|fee|fund|rate|"
+    r"profit|loss|margin|earnings|valuation|salary|payment|invoice|debt|"
+    r"credit|debit|stock|equity|bond|yield|dividend|interest|inflation",
+    re.IGNORECASE,
 )
 _ENTITY_PATTERNS = re.compile(
-    r'patient|doctor|agent|team|company|org|user|client|server|system|'
-    r'person|department|hospital|university|platform|service|API|database',
-    re.IGNORECASE
+    r"patient|doctor|agent|team|company|org|user|client|server|system|"
+    r"person|department|hospital|university|platform|service|api|database|"
+    r"marketing|engineering|sales|finance|operations|hr|legal",
+    re.IGNORECASE,
 )
 _METRIC_PATTERNS = re.compile(
-    r'%|percent|ratio|score|rate|count|total|average|mean|median|'
-    r'index|level|volume|size|length|height|weight|temperature|'
-    r'latency|throughput|bandwidth|accuracy|precision|recall|f1',
-    re.IGNORECASE
+    r"%|percent|ratio|score|rate|count|total|average|mean|median|"
+    r"index|level|volume|size|length|height|weight|temperature|"
+    r"latency|throughput|bandwidth|accuracy|precision|recall|f1|target|"
+    r"feature|campaign|employee|order|users?",
+    re.IGNORECASE,
 )
 _EVENT_PATTERNS = re.compile(
-    r'launch|release|deploy|publish|announce|discover|detect|trigger|'
-    r'alert|incident|outage|breach|update|merge|commit|approve|reject|'
-    r'start|stop|begin|end|occur|happen|complete|fail|succeed',
-    re.IGNORECASE
+    r"launch|release|deploy|publish|announce|discover|detect|trigger|"
+    r"alert|incident|outage|breach|update|merge|commit|approve|reject|"
+    r"start|stop|begin|end|occur|happen|complete|fail|succeed",
+    re.IGNORECASE,
 )
 _STATE_PATTERNS = re.compile(
-    r'bullish|bearish|stable|volatile|active|inactive|pending|resolved|'
-    r'healthy|critical|warning|normal|abnormal|positive|negative|neutral|'
-    r'increasing|decreasing|improving|degrading|growing|shrinking|probable|'
-    r'possible|likely|unlikely|confirmed|suspected|uncertain',
-    re.IGNORECASE
+    r"bullish|bearish|stable|volatile|active|inactive|pending|resolved|"
+    r"healthy|critical|warning|normal|abnormal|positive|negative|neutral|"
+    r"increasing|decreasing|improving|degrading|growing|shrinking|probable|"
+    r"possible|likely|unlikely|confirmed|suspected|uncertain",
+    re.IGNORECASE,
 )
+
+
+NER_TO_VALUE_PREFIX = {
+    "MONEY": "amt",
+    "PERCENT": "pct",
+    "CARDINAL": "count",
+    "QUANTITY": "qty",
+    "DATE": "date",
+    "TIME": "date",
+}
 
 
 def classify_tag(text: str, ent_label: str = "") -> tuple[TagType, str]:
-    """Classify text into a tag type and extract the value."""
-    # NER label hints
-    if ent_label in ("MONEY", "PERCENT"):
+    """Classify text into an AXL tag type.
+
+    Important change from v0.7.0: PERCENT is treated as a metric, not as a
+    financial subject by default.
+    """
+    if ent_label == "MONEY":
         return TagType.FINANCIAL, text
-    if ent_label in ("PERSON", "ORG", "GPE", "NORP", "FAC"):
+    if ent_label == "PERCENT":
+        return TagType.METRIC, text
+    if ent_label in ("PERSON", "ORG", "GPE", "NORP", "FAC", "PRODUCT"):
         return TagType.ENTITY, text
     if ent_label in ("QUANTITY", "CARDINAL", "ORDINAL"):
         return TagType.METRIC, text
@@ -93,7 +227,6 @@ def classify_tag(text: str, ent_label: str = "") -> tuple[TagType, str]:
     if ent_label in ("DATE", "TIME"):
         return TagType.VALUE, text
 
-    # Pattern matching
     if _FINANCIAL_PATTERNS.search(text):
         return TagType.FINANCIAL, text
     if _ENTITY_PATTERNS.search(text):
@@ -104,76 +237,74 @@ def classify_tag(text: str, ent_label: str = "") -> tuple[TagType, str]:
         return TagType.EVENT, text
     if _STATE_PATTERNS.search(text):
         return TagType.STATE, text
-
-    # Default: value
     return TagType.VALUE, text
 
 
-# -- Operation classification ----------------------------------
+# -- Operation classification ------------------------------------------------
 
 _INF_PATTERNS = re.compile(
-    r'\b(therefore|thus|hence|consequently|implies?|suggests?|indicates?|'
-    r'conclud|infer|mean|because|result|caus|lead|determin|analys|assess|'
-    r'evaluat|estimat|calculat|deriv|based on|according to)\b',
-    re.IGNORECASE
+    r"\b(therefore|thus|hence|consequently|implies?|suggests?|indicates?|"
+    r"conclud|infer|mean|because|result|caus|lead|determin|analys|assess|"
+    r"evaluat|estimat|calculat|deriv|based on|according to)\b",
+    re.IGNORECASE,
 )
 _CON_PATTERNS = re.compile(
-    r'\b(however|but|although|despite|disagree|contradict|challenge|'
-    r'dispute|incorrect|wrong|false|reject|deny|counter|unlike|'
-    r'on the other hand|in contrast|nevertheless|alternatively)\b',
-    re.IGNORECASE
+    r"\b(however|but|although|despite|disagree|contradict|challenge|"
+    r"dispute|incorrect|wrong|false|reject|deny|counter|unlike|"
+    r"on the other hand|in contrast|nevertheless|alternatively)\b",
+    re.IGNORECASE,
 )
 _MRG_PATTERNS = re.compile(
-    r'\b(overall|together|combined|synthesiz|integrat|both|all|'
-    r'in summary|in conclusion|to summarize|taken together|'
-    r'consensus|agree|align|converge|reconcil)\b',
-    re.IGNORECASE
+    r"\b(overall|together|combined|synthesiz|integrat|both|all|"
+    r"in summary|in conclusion|to summarize|taken together|"
+    r"consensus|agree|align|converge|reconcil)\b",
+    re.IGNORECASE,
 )
 _SEK_PATTERNS = re.compile(
-    r'\b(need|require|request|ask|seek|want|looking for|searching|'
-    r'where|how|what|when|who|which|please provide|can you|'
-    r'unknown|unclear|missing|investigate|determine)\b',
-    re.IGNORECASE
+    r"\b(need|require|request|ask|seek|want|looking for|searching|"
+    r"where|how|what|when|who|which|please provide|can you|"
+    r"unknown|unclear|missing|investigate|determine)\b",
+    re.IGNORECASE,
 )
 _YLD_PATTERNS = re.compile(
-    r'\b(changed? my mind|revised?|updated?|previously|was wrong|'
-    r'now (believe|think)|correction|retract|amend|pivot|shift|'
-    r'no longer|instead|originally|formerly)\b',
-    re.IGNORECASE
+    r"\b(changed? my mind|revised?|updated?|previously|was wrong|"
+    r"now (believe|think)|correction|retract|amend|pivot|shift|"
+    r"no longer|instead|originally|formerly)\b",
+    re.IGNORECASE,
 )
 _PRD_PATTERNS = re.compile(
-    r'\b(predict|forecast|expect|anticipat|project|will|would|'
-    r'likely to|probably|estimated to|by (next|end|Q[1-4]|20\d\d)|'
-    r'in the (next|coming)|future|outlook|prognosis|trajectory)\b',
-    re.IGNORECASE
+    r"\b(predict|forecast|expect|anticipat|project|will|would|"
+    r"likely to|probably|estimated to|by (next|end|Q[1-4]|20\d\d)|"
+    r"in the (next|coming)|future|outlook|prognosis|trajectory)\b",
+    re.IGNORECASE,
 )
 
 
 def classify_operation(text: str) -> Operation:
-    """Classify a sentence into an AXL operation."""
-    # Score each operation
     scores = {
         Operation.INF: len(_INF_PATTERNS.findall(text)),
-        Operation.CON: len(_CON_PATTERNS.findall(text)) * 1.5,  # boost contradictions
+        Operation.CON: len(_CON_PATTERNS.findall(text)) * 1.5,
         Operation.MRG: len(_MRG_PATTERNS.findall(text)),
         Operation.SEK: len(_SEK_PATTERNS.findall(text)),
-        Operation.YLD: len(_YLD_PATTERNS.findall(text)) * 2,  # boost yield (rare)
+        Operation.YLD: len(_YLD_PATTERNS.findall(text)) * 2,
         Operation.PRD: len(_PRD_PATTERNS.findall(text)),
     }
-
     best = max(scores, key=scores.get)
     if scores[best] > 0:
         return best
-    return Operation.OBS  # Default: observation
+    return Operation.OBS
 
 
-# -- Confidence scoring ----------------------------------------
+# -- Confidence --------------------------------------------------------------
 
-def score_confidence(text: str, operation: Operation = Operation.OBS, has_numbers: bool = False, has_entities: bool = False) -> int:
-    """Score confidence 0-99 based on content and hedging language."""
-    base = 75  # default
 
-    # Operation-based base
+def score_confidence(
+    text: str,
+    operation: Operation = Operation.OBS,
+    has_numbers: bool = False,
+    has_entities: bool = False,
+) -> int:
+    base = 75
     if operation == Operation.OBS:
         base = 90 if has_numbers else (85 if has_entities else 80)
     elif operation == Operation.INF:
@@ -183,23 +314,40 @@ def score_confidence(text: str, operation: Operation = Operation.OBS, has_number
     elif operation == Operation.MRG:
         base = 78
     elif operation == Operation.SEK:
-        return 90  # High confidence we need info
+        return 90
     elif operation == Operation.YLD:
         base = 82
     elif operation == Operation.PRD:
         base = 70
 
-    # Hedging adjustments
     hedging = {
-        'approximately': -5, 'estimated': -5, 'roughly': -8,
-        'about': -3, 'around': -3, 'nearly': -3,
-        'possibly': -15, 'perhaps': -15, 'might': -12, 'may': -10,
-        'could': -8, 'uncertain': -15, 'unclear': -12,
-        'likely': +3, 'probably': +2, 'expected': +3,
-        'confirmed': +5, 'verified': +5, 'proven': +5,
-        'definitely': +8, 'certainly': +8, 'clearly': +5,
-        'reported': +0, 'stated': +0, 'claimed': -3,
-        'will': +5, 'shall': +5,
+        "approximately": -5,
+        "estimated": -5,
+        "roughly": -8,
+        "about": -3,
+        "around": -3,
+        "nearly": -3,
+        "possibly": -15,
+        "perhaps": -15,
+        "might": -12,
+        "may": -10,
+        "could": -8,
+        "uncertain": -15,
+        "unclear": -12,
+        "likely": +3,
+        "probably": +2,
+        "expected": +3,
+        "confirmed": +5,
+        "verified": +5,
+        "proven": +5,
+        "definitely": +8,
+        "certainly": +8,
+        "clearly": +5,
+        "reported": +0,
+        "stated": +0,
+        "claimed": -3,
+        "will": +5,
+        "shall": +5,
     }
 
     text_lower = text.lower()
@@ -211,278 +359,595 @@ def score_confidence(text: str, operation: Operation = Operation.OBS, has_number
     return max(10, min(99, base + adjustment))
 
 
-# -- Temporal extraction ---------------------------------------
+# -- Temporal ----------------------------------------------------------------
 
 _TEMPORAL_MAP = {
-    r'\bnow\b|\bcurrently\b|\btoday\b|\bpresent\b|\bright now\b': "NOW",
-    r'\b(next|coming)\s+hour\b|\b1\s*h\b|\bhourly\b': "1H",
-    r'\b(next|coming)\s+4\s*hours?\b|\b4\s*h\b': "4H",
-    r'\b(tomorrow|next day|1\s*d|daily)\b': "1D",
-    r'\b(next|this|coming)\s+week\b|\b1\s*w\b|\bweekly\b': "1W",
-    r'\b(next|this|coming)\s+month\b|\b1\s*m\b|\bmonthly\b': "1M",
-    r'\b(historical|past|previous|last|ago|formerly)\b': "HIST",
+    r"\bnow\b|\bcurrently\b|\btoday\b|\bpresent\b|\bright now\b": "NOW",
+    r"\b(next|coming)\s+hour\b|\b1\s*h\b|\bhourly\b": "1H",
+    r"\b(next|coming)\s+4\s*hours?\b|\b4\s*h\b": "4H",
+    r"\b(tomorrow|next day|1\s*d|daily)\b": "1D",
+    r"\b(next|this|coming)\s+week\b|\b1\s*w\b|\bweekly\b": "1W",
+    r"\b(next|this|coming)\s+month\b|\b1\s*m\b|\bmonthly\b": "1M",
+    r"\b(historical|past|previous|last|ago|formerly)\b": "HIST",
 }
 
 
 def extract_temporal(text: str) -> str:
-    """Extract temporal scope from text."""
     for pattern, temporal in _TEMPORAL_MAP.items():
         if re.search(pattern, text, re.IGNORECASE):
             return temporal
-    return "NOW"  # Default
+    return "NOW"
 
 
-# -- Evidence extraction ---------------------------------------
+# -- Evidence ----------------------------------------------------------------
+
+_CAUSAL_MARKERS = {"because", "since", "as"}
+_ATTRIBUTION_MARKERS = {"according", "reported", "per"}
+_PREP_CAUSAL_HEADS = {"due", "based", "driven", "caused"}
+
 
 def extract_evidence(text: str, doc=None) -> Optional[str]:
-    """Extract evidence/cause from text using patterns and spaCy deps."""
-    # Pattern-based extraction
+    """Extract evidence/cause from text.
+
+    Important fix from v0.7.0:
+    dependency fallback now ignores generic root-level prepositions such as
+    "by 2025" and "by 30%" so temporal/location phrases do not become fake
+    causal evidence.
+    """
     patterns = [
-        (r'\b(?:because|since|as)\b\s+(.+?)(?:\.|,|$)', '<-'),
-        (r'\b(?:based on|due to|driven by|caused by)\b\s+(.+?)(?:\.|,|$)', '<-'),
-        (r'\b(?:according to|reported by|per)\b\s+(.+?)(?:\.|,|$)', '<-@'),
-        (r'\b(?:disagrees? with|contradicts?|challenges?)\b\s+(.+?)(?:\.|,|$)', 'RE:'),
+        (r"\b(?:because|since|as)\b\s+(.+?)(?:\.|,|$)", "<-"),
+        (r"\b(?:based on|due to|driven by|caused by)\b\s+(.+?)(?:\.|,|$)", "<-"),
+        (r"\b(?:according to|reported by|per)\b\s+(.+?)(?:\.|,|$)", "<-@"),
+        (r"\b(?:disagrees? with|contradicts?|challenges?)\b\s+(.+?)(?:\.|,|$)", "RE:"),
     ]
 
     for pattern, prefix in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             evidence = match.group(1).strip()[:120]
-            evidence = re.sub(r'[^\w\s.+-]', '', evidence).strip()
-            evidence = _truncate_word(evidence.replace(' ', '_'), 100)
+            evidence = re.sub(r"[^\w\s.+-]", "", evidence).strip()
+            evidence = _truncate_word(evidence.replace(" ", "_"), 100)
             if evidence:
                 return f"{prefix}{evidence}"
 
-    # spaCy dependency-based: find advcl or mark dependencies
-    if doc:
-        for token in doc:
-            if token.dep_ in ('advcl', 'prep') and token.head.dep_ == 'ROOT':
-                subtree = ' '.join([t.text for t in token.subtree])[:100]
-                clean = _truncate_word(re.sub(r'[^\w\s]', '', subtree).strip().replace(' ', '_'), 80)
+    if not doc:
+        return None
+
+    for token in doc:
+        # because/since/as subordinate clause
+        if token.dep_ == "advcl":
+            marks = {child.lemma_.lower() for child in token.children if child.dep_ == "mark"}
+            if marks & _CAUSAL_MARKERS:
+                subtree = " ".join(t.text for t in token.subtree)
+                clean = _clean_token_value(re.sub(r"[^\w\s.+-]", "", subtree), max_len=80)
                 if clean and len(clean) > 3:
                     return f"<-{clean}"
+
+        # according to / based on / due to style prepositional evidence only
+        if token.dep_ == "prep" and token.lemma_.lower() in _PREP_CAUSAL_HEADS:
+            subtree = " ".join(t.text for t in token.subtree)
+            clean = _clean_token_value(re.sub(r"[^\w\s.+-]", "", subtree), max_len=80)
+            if clean and len(clean) > 3:
+                return f"<-{clean}"
 
     return None
 
 
-# -- Subject extraction ----------------------------------------
+# -- Subject extraction ------------------------------------------------------
 
-def extract_subject(doc, sent_text: str) -> tuple[TagType, str]:
-    """Extract the primary subject from a sentence using NER and noun chunks."""
-    # Priority 1: NER entities (most semantically meaningful)
-    best_ent = None
-    for ent in doc.ents:
-        # Prefer PERSON, ORG, MONEY, PRODUCT over generic labels
-        if ent.label_ in ("PERSON", "ORG", "GPE", "PRODUCT", "WORK_OF_ART"):
-            best_ent = ent
-            break
-        if ent.label_ in ("MONEY", "QUANTITY", "PERCENT") and not best_ent:
-            best_ent = ent
-        if not best_ent:
-            best_ent = ent
+_PRONOUNS = {
+    "i",
+    "you",
+    "we",
+    "they",
+    "he",
+    "she",
+    "it",
+    "this",
+    "that",
+    "these",
+    "those",
+    "someone",
+    "somebody",
+    "something",
+    "anything",
+    "everything",
+}
 
-    if best_ent:
-        tag, val = classify_tag(best_ent.text, best_ent.label_)
-        clean = re.sub(r'[^\w.%-]', '_', val).replace('__', '_').strip('_')
-        clean = _truncate_word(clean, 30)
-        if clean:
-            return tag, clean
+_WEAK_SUBJECTS = {
+    "thing",
+    "stuff",
+    "situation",
+    "issue",
+    "matter",
+    "problem",
+    "case",
+    "item",
+    "something",
+    "anything",
+    "everything",
+}
 
-    # Priority 2: Subject noun chunk (the grammatical subject)
+_REQUEST_LEMMAS = {
+    "need",
+    "want",
+    "seek",
+    "request",
+    "require",
+    "ask",
+    "know",
+    "understand",
+    "learn",
+    "investigate",
+    "determine",
+}
+
+_ROLE_STOPWORDS = {
+    "dollar",
+    "dollars",
+    "usd",
+    "percent",
+    "percentage",
+    "year",
+    "month",
+    "quarter",
+    "date",
+    "time",
+    "team",
+    "company",
+    "system",
+    "organization",
+    "org",
+}
+
+
+def _is_pronoun_like(text: str) -> bool:
+    stripped = text.strip().lower()
+    return stripped in _PRONOUNS or bool(re.fullmatch(r"(?:i|you|we|they|he|she|it|this|that)", stripped))
+
+
+def _is_weak_subject(text: str) -> bool:
+    stripped = text.strip().lower()
+    return stripped in _WEAK_SUBJECTS
+
+
+def _score_entity_candidate(ent) -> int:
+    score = 0
+    if ent.label_ in ("ORG", "PERSON", "GPE", "NORP", "FAC", "PRODUCT"):
+        score += 110
+    elif ent.label_ in ("DATE", "TIME"):
+        score -= 30
+    elif ent.label_ in ("MONEY", "PERCENT", "CARDINAL", "QUANTITY", "ORDINAL"):
+        score -= 40
+
+    if ent.root.dep_ in ("nsubj", "nsubjpass", "attr"):
+        score += 25
+    if _ENTITY_PATTERNS.search(ent.text):
+        score += 20
+    if _is_pronoun_like(ent.text):
+        score -= 200
+    if _is_weak_subject(ent.text):
+        score -= 25
+    return score
+
+
+def _score_chunk_candidate(chunk) -> int:
+    score = 0
+    if chunk.root.dep_ in ("nsubj", "nsubjpass", "attr"):
+        score += 95
+    elif chunk.root.dep_ in ("dobj", "pobj", "appos"):
+        score += 40
+    if any(tok.pos_ == "PROPN" for tok in chunk):
+        score += 20
+    if _ENTITY_PATTERNS.search(chunk.text):
+        score += 25
+    if any(tok.like_num for tok in chunk):
+        score -= 35
+    if _is_pronoun_like(chunk.text):
+        score -= 200
+    if _is_weak_subject(chunk.text):
+        score -= 20
+    return score
+
+
+def _extract_seek_subject(doc) -> Optional[str]:
+    """Prefer the object/complement of the request, not the pronoun requester."""
+    for token in doc:
+        if token.lemma_.lower() not in _REQUEST_LEMMAS:
+            continue
+
+        for child in token.children:
+            if child.dep_ in ("dobj", "attr", "oprd", "pobj") and child.pos_ in ("NOUN", "PROPN"):
+                span = doc[child.left_edge.i : child.right_edge.i + 1]
+                if not _is_pronoun_like(span.text):
+                    return span.text
+            if child.dep_ in ("xcomp", "ccomp"):
+                for gc in child.children:
+                    if gc.dep_ in ("dobj", "attr", "pobj") and gc.pos_ in ("NOUN", "PROPN"):
+                        span = doc[gc.left_edge.i : gc.right_edge.i + 1]
+                        if not _is_pronoun_like(span.text):
+                            return span.text
+            if child.dep_ == "prep" and child.lemma_.lower() in {"about", "for", "on", "regarding"}:
+                for gc in child.children:
+                    if gc.dep_ == "pobj":
+                        span = doc[gc.left_edge.i : gc.right_edge.i + 1]
+                        if not _is_pronoun_like(span.text):
+                            return span.text
+
     for chunk in doc.noun_chunks:
-        if chunk.root.dep_ in ("nsubj", "nsubjpass", "attr"):
-            tag, val = classify_tag(chunk.root.text)
-            clean = re.sub(r'[^\w.%-]', '_', chunk.text).replace('__', '_').strip('_')
-            clean = _truncate_word(clean, 30)
-            return tag, clean
+        if chunk.root.dep_ in ("dobj", "pobj", "attr") and not _is_pronoun_like(chunk.text):
+            return chunk.text
+    return None
 
-    # Priority 3: First noun chunk
-    chunks = list(doc.noun_chunks)
-    if chunks:
-        tag, val = classify_tag(chunks[0].text)
-        clean = re.sub(r'[^\w.%-]', '_', chunks[0].text).replace('__', '_').strip('_')
-        clean = _truncate_word(clean, 30)
-        return tag, clean
 
-    # Priority 4: First PROPN or NOUN token
-    for tok in doc:
-        if tok.pos_ == "PROPN":
-            tag, val = classify_tag(tok.text)
-            return tag, tok.text[:30]
-    for tok in doc:
-        if tok.pos_ == "NOUN":
-            tag, val = classify_tag(tok.text)
-            return tag, tok.text[:30]
+def extract_subject(
+    doc,
+    sent_text: str,
+    operation: Operation = Operation.OBS,
+    context_subject: Optional[tuple[TagType, str]] = None,
+) -> tuple[TagType, str]:
+    """Extract the best semantic subject.
 
+    Changes from v0.7.0:
+    - noun chunks are allowed to outrank numeric NER
+    - pronouns are rejected as subjects
+    - SEK requests prefer the requested object/complement
+    - weak/numeric candidates fall back to prior context if available
+    """
+    if operation == Operation.SEK:
+        seek_subject = _extract_seek_subject(doc)
+        if seek_subject:
+            tag, _ = classify_tag(seek_subject)
+            clean = _clean_token_value(seek_subject, max_len=40, keep=".-")
+            if clean:
+                return tag, clean
+
+    best_score = -10_000
+    best: Optional[tuple[TagType, str]] = None
+
+    # Grammatical noun chunks first.
+    for chunk in doc.noun_chunks:
+        score = _score_chunk_candidate(chunk)
+        if score <= best_score:
+            continue
+        tag, _ = classify_tag(chunk.text)
+        clean = _clean_token_value(chunk.text, max_len=40, keep=".-")
+        if clean:
+            best_score = score
+            best = (tag, clean)
+
+    # Then named entities.
+    for ent in doc.ents:
+        score = _score_entity_candidate(ent)
+        if score <= best_score:
+            continue
+        tag, _ = classify_tag(ent.text, ent.label_)
+        clean = _clean_token_value(ent.text, max_len=40, keep=".-")
+        if clean:
+            best_score = score
+            best = (tag, clean)
+
+    # Fallback tokens.
+    if not best:
+        for tok in doc:
+            if tok.pos_ in ("PROPN", "NOUN") and not tok.like_num and not _is_pronoun_like(tok.text):
+                tag, _ = classify_tag(tok.text)
+                clean = _clean_token_value(tok.text, max_len=30, keep=".-")
+                if clean:
+                    best = (tag, clean)
+                    best_score = 10
+                    break
+
+    if best and best_score >= 15:
+        return best
+
+    # Weak current subject? Carry forward prior entity context if available.
+    if context_subject:
+        return context_subject
+
+    if best:
+        return best
     return TagType.VALUE, "claim"
 
 
-# -- Main pipeline ---------------------------------------------
+# -- Atomic value extraction -------------------------------------------------
 
-def english_to_v3(
-    text: str,
-    agent_id: str = "COMPRESS",
-) -> list[V3Packet]:
-    """Convert English prose to AXL v3 packets.
 
-    Deterministic NLP pipeline. No LLM dependency.
+def infer_role_label(ent, doc) -> Optional[str]:
+    """Infer the semantic slot tied to a numeric entity.
 
-    Args:
-        text: English prose to compress
-        agent_id: Agent ID for generated packets
-
-    Returns:
-        List of V3Packet objects
+    Examples:
+    - 30% growth -> growth
+    - 5 million in revenue -> revenue
+    - 200 new employees -> employees
     """
+    candidates: list[tuple[int, str]] = []
+
+    # Nearby nouns, preferring those to the right of the entity.
+    start = max(0, ent.start - 2)
+    end = min(len(doc), ent.end + 5)
+    for tok in doc[start:end]:
+        if tok.i >= ent.start and tok.i < ent.end:
+            continue
+        if tok.pos_ not in ("NOUN", "PROPN"):
+            continue
+        lemma = tok.lemma_.lower()
+        if lemma in _ROLE_STOPWORDS or tok.like_num:
+            continue
+        distance = abs(tok.i - ent.root.i)
+        score = 20 - distance
+        if tok.i >= ent.end:
+            score += 5
+        if tok.dep_ in ("pobj", "dobj", "attr", "appos", "nsubj"):
+            score += 5
+        candidates.append((score, tok.text))
+
+    head = ent.root.head
+    if head.pos_ in ("NOUN", "PROPN") and head.lemma_.lower() not in _ROLE_STOPWORDS and not head.like_num:
+        candidates.append((28, head.text))
+
+    if not candidates:
+        return None
+
+    role = max(candidates, key=lambda item: item[0])[1]
+    return _clean_token_value(role, max_len=20, keep=".-").lower()
+
+
+def collect_role_qualifiers(doc) -> dict[str, list[str]]:
+    """Attach adjectives to their semantic role instead of taking only the first ADJ."""
+    out: dict[str, list[str]] = defaultdict(list)
+    for tok in doc:
+        if tok.pos_ != "ADJ" or tok.dep_ not in ("amod", "acomp", "attr"):
+            continue
+        if tok.lemma_.lower() in {"the", "a", "an", "this", "that", "same", "other"}:
+            continue
+        head = tok.head
+        if head.pos_ not in ("NOUN", "PROPN"):
+            continue
+        role = _clean_token_value(head.lemma_ or head.text, max_len=20).lower()
+        if role:
+            qual = _clean_token_value(tok.lemma_.lower(), max_len=16)
+            out[role].append(f"~state:{qual}")
+    return out
+
+
+def _join_subject_role(base_subject: str, role: Optional[str]) -> str:
+    if not role:
+        return base_subject
+    parts = {p.lower() for p in base_subject.split(".")}
+    if role.lower() in parts:
+        return base_subject
+    return _truncate_word(f"{base_subject}.{role}", 48)
+
+
+def _dedupe_preserve_order(items: Iterable[str]) -> list[str]:
+    seen = set()
+    out = []
+    for item in items:
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def extract_atomic_payloads(doc, base_subject: str) -> list[tuple[str, str]]:
+    """Produce one packet payload per semantic value slot.
+
+    This is the key fix for ARG2 concatenation: instead of stuffing every value in a
+    sentence into a single flat field, split the sentence into atomic facts that each
+    keep only tightly related pieces together.
+    """
+    qualifiers_by_role = collect_role_qualifiers(doc)
+    global_dates: list[str] = []
+    slot_map: dict[str, dict[str, object]] = {}
+
+    for ent in doc.ents:
+        if ent.label_ not in NER_TO_VALUE_PREFIX:
+            continue
+        normalized = normalize_entity_value(ent.text, ent.label_)
+        if not normalized:
+            continue
+
+        if ent.label_ in ("DATE", "TIME"):
+            global_dates.append(f"^date:{normalized}")
+            continue
+
+        prefix = NER_TO_VALUE_PREFIX[ent.label_]
+        role = infer_role_label(ent, doc)
+        slot_key = role or prefix
+        slot = slot_map.setdefault(slot_key, {"role": role, "values": []})
+        values = slot["values"]
+        assert isinstance(values, list)
+        values.append(f"^{prefix}:{normalized}")
+
+    payloads: list[tuple[str, str]] = []
+    unique_dates = _dedupe_preserve_order(global_dates)[:1]
+
+    for slot in slot_map.values():
+        role = slot.get("role")
+        values = _dedupe_preserve_order(slot.get("values", []))[:1]
+        subject_value = _join_subject_role(base_subject, role if isinstance(role, str) else None)
+        arg2_parts = list(values)
+
+        if isinstance(role, str):
+            for qual in _dedupe_preserve_order(qualifiers_by_role.get(role, []))[:1]:
+                if qual not in arg2_parts:
+                    arg2_parts.append(qual)
+
+        for d in unique_dates:
+            if d not in arg2_parts:
+                arg2_parts.append(d)
+
+        if arg2_parts:
+            payloads.append((subject_value, "+".join(arg2_parts)))
+
+    # If a sentence only contributed dates, preserve at least one date packet.
+    if not payloads and unique_dates:
+        payloads.append((_join_subject_role(base_subject, "date"), unique_dates[0]))
+
+    # If there were no numeric/date entities but a semantic adjective exists, emit it.
+    if not payloads:
+        for role, quals in qualifiers_by_role.items():
+            if quals:
+                payloads.append((_join_subject_role(base_subject, role), quals[0]))
+                break
+
+    return payloads
+
+
+def _seek_request_arg(sent_text: str) -> str:
+    text = sent_text.lower()
+    if "more" in text:
+        return "^need:more_info"
+    if any(w in text for w in ("why", "how", "when", "where", "what", "which", "who")):
+        return "^need:answer"
+    return "^need:info"
+
+
+def _seek_target_arg(sent_text: str) -> str:
+    text = sent_text.lower()
+    if any(p in text for p in ("can you", "please", "could you", "would you", "provide")):
+        return "RE:operator"
+    return "RE:unknown"
+
+
+# -- Main pipeline -----------------------------------------------------------
+
+
+def english_to_v3(text: str, agent_id: str = "COMPRESS") -> list[V3Packet]:
     nlp = _get_nlp()
     doc = nlp(text)
-    packets = []
+    packets: list[V3Packet] = []
+    context_subject: Optional[tuple[TagType, str]] = None
 
     for sent in doc.sents:
         sent_text = sent.text.strip()
-        if len(sent_text) < 5:  # Skip trivial fragments
+        if len(sent_text) < 5:
             continue
 
         sent_doc = nlp(sent_text)
-
-        # 1. Classify operation
         operation = classify_operation(sent_text)
 
-        # 2. Score confidence (FIX 4: pass operation and content flags)
-        has_nums = bool(sent_doc.ents and any(e.label_ in ('MONEY', 'QUANTITY', 'CARDINAL', 'PERCENT') for e in sent_doc.ents))
-        has_ents = bool(sent_doc.ents and any(e.label_ in ('PERSON', 'ORG', 'GPE') for e in sent_doc.ents))
+        has_nums = bool(
+            sent_doc.ents and any(e.label_ in ("MONEY", "QUANTITY", "CARDINAL", "PERCENT", "DATE") for e in sent_doc.ents)
+        )
+        has_ents = bool(sent_doc.ents and any(e.label_ in ("PERSON", "ORG", "GPE") for e in sent_doc.ents))
         confidence = score_confidence(sent_text, operation, has_nums, has_ents)
 
-        # 3. Extract subject
-        tag_type, subject_value = extract_subject(sent_doc, sent_text)
+        tag_type, subject_value = extract_subject(sent_doc, sent_text, operation, context_subject)
+        if tag_type == TagType.ENTITY:
+            context_subject = (tag_type, subject_value)
 
-        # 4. Extract temporal
         temporal = extract_temporal(sent_text)
-
-        # 5. Extract evidence (ARG1) - FIX 1: pass sent_doc for dep parsing
         evidence = extract_evidence(sent_text, sent_doc)
 
-        # 6. Extract additional values (ARG2) - FIX 2: IMPROVED
-        _ner_prefix_map = {
-            "MONEY": "amt",
-            "PERCENT": "pct",
-            "CARDINAL": "count",
-            "QUANTITY": "qty",
-            "DATE": "date",
-        }
-        values = []
-        for ent in sent_doc.ents:
-            if ent.label_ in ("MONEY", "QUANTITY", "CARDINAL", "PERCENT", "DATE"):
-                clean = ent.text.strip()
-                # Normalize numbers
-                clean = re.sub(r'\$\s*', '', clean)
-                clean = re.sub(r',', '', clean)
-                # Compact large numbers
-                try:
-                    num = float(re.sub(r'[^\d.]', '', clean))
-                    if num >= 1_000_000_000:
-                        clean = f'{num/1_000_000_000:.1f}B'
-                    elif num >= 1_000_000:
-                        clean = f'{num/1_000_000:.1f}M'
-                    elif num >= 1_000:
-                        clean = f'{num/1_000:.1f}K'
-                except (ValueError, TypeError):
-                    pass
-                clean = re.sub(r'[^\w.%+-]', '', clean)[:20]
-                if clean:
-                    prefix = _ner_prefix_map.get(ent.label_, "")
-                    values.append(f"^{prefix}:{clean}" if prefix else f"^{clean}")
-
-        # Also extract qualitative states
-        for token in sent_doc:
-            if token.pos_ == 'ADJ' and token.dep_ in ('acomp', 'attr', 'amod'):
-                if token.text.lower() not in ('the', 'a', 'an', 'this', 'that'):
-                    if token.head.pos_ in ('NOUN', 'PROPN'):
-                        values.append(f"~{token.head.text.lower()}:{token.text.lower()}")
-                    else:
-                        values.append(f"~{token.text.lower()}")
-                    break  # Only first qualifier
-
-        arg2 = "+".join(values[:4]) if values else None
-
-        # 7. Assemble packet
-        packet = V3Packet(
-            id=agent_id,
-            operation=operation,
-            confidence=confidence,
-            subject_tag=tag_type,
-            subject_value=subject_value,
-            arg1=evidence,
-            arg2=arg2,
-            temporal=temporal,
-        )
-
-        packets.append(packet)
-
-    # If multiple packets and none is MRG, add a synthesis packet
-    if len(packets) > 2:
-        subjects = set()
-        for p in packets:
-            subjects.add(p.subject_value)
-        if len(subjects) > 1 and not any(p.operation == Operation.MRG for p in packets):
-            mrg = V3Packet(
-                id=agent_id,
-                operation=Operation.MRG,
-                confidence=min(80, max(p.confidence for p in packets)),
-                subject_tag=packets[0].subject_tag,
-                subject_value=packets[0].subject_value,
-                arg1=f"RE:{'+'.join(list(subjects)[:3])}",
-                temporal="NOW",
+        if operation == Operation.SEK:
+            packets.append(
+                V3Packet(
+                    id=agent_id,
+                    operation=operation,
+                    confidence=confidence,
+                    subject_tag=tag_type,
+                    subject_value=subject_value,
+                    arg1=_seek_target_arg(sent_text),
+                    arg2=_seek_request_arg(sent_text),
+                    temporal=temporal,
+                )
             )
-            packets.append(mrg)
+            continue
 
-    # FIX 3: Generate bundle manifest (loss contract)
+        payloads = extract_atomic_payloads(sent_doc, subject_value)
+        if payloads:
+            for subject_variant, arg2 in payloads:
+                packets.append(
+                    V3Packet(
+                        id=agent_id,
+                        operation=operation,
+                        confidence=confidence,
+                        subject_tag=tag_type,
+                        subject_value=subject_variant,
+                        arg1=evidence,
+                        arg2=arg2,
+                        temporal=temporal,
+                    )
+                )
+        else:
+            packets.append(
+                V3Packet(
+                    id=agent_id,
+                    operation=operation,
+                    confidence=confidence,
+                    subject_tag=tag_type,
+                    subject_value=subject_value,
+                    arg1=evidence,
+                    arg2=None,
+                    temporal=temporal,
+                )
+            )
+
+    # Intentionally no synthetic MRG here.
+    # v0.7.0 created invalid RE targets like RE:5+3+30% or RE:subject_values,
+    # which do not satisfy the v3 kernel requirement for reference targets.
+
     if packets:
         has_entities = any(p.subject_tag == TagType.ENTITY for p in packets)
-        has_numbers = any(p.arg2 and '^' in (p.arg2 or '') for p in packets)
-        has_causality = any(p.arg1 and ('<-' in (p.arg1 or '') or 'RE:' in (p.arg1 or '')) for p in packets)
-        has_confidence = True  # Always have CC
-        has_temporal = any(p.temporal != 'NOW' for p in packets)
+        has_numbers = any(p.arg2 and "^" in (p.arg2 or "") for p in packets)
+        has_causality = any(p.arg1 and ("<-" in (p.arg1 or "") or "RE:" in (p.arg1 or "")) for p in packets)
+        has_confidence = True
+        has_temporal = any(
+            p.temporal != "NOW" or (p.arg2 and "^date:" in p.arg2)
+            for p in packets
+        )
 
         fidelity = 0
-        if has_entities: fidelity += 20
-        if has_numbers: fidelity += 20
-        if has_causality: fidelity += 20
-        if has_confidence: fidelity += 20
-        if has_temporal: fidelity += 20
+        if has_entities:
+            fidelity += 20
+        if has_numbers:
+            fidelity += 20
+        if has_causality:
+            fidelity += 20
+        if has_confidence:
+            fidelity += 20
+        if has_temporal:
+            fidelity += 20
 
-        mode = 'qa' if (has_entities and has_numbers and has_causality) else 'gist'
-
-        keep_parts = ['entities', 'confidence']
-        if has_numbers: keep_parts.append('numbers')
-        if has_causality: keep_parts.append('causality')
-        if has_temporal: keep_parts.append('temporal')
+        mode = "qa" if (has_entities and has_numbers and has_temporal) else "gist"
+        keep_parts = ["confidence"]
+        if has_entities:
+            keep_parts.append("entities")
+        if has_numbers:
+            keep_parts.append("numbers")
+        if has_causality:
+            keep_parts.append("causality")
+        if has_temporal:
+            keep_parts.append("temporal")
+        keep_parts = _dedupe_preserve_order(keep_parts)
 
         manifest = V3Packet(
-            id='axl-core',
+            id="axl-core",
             operation=Operation.OBS,
             confidence=99,
             subject_tag=TagType.ENTITY,
-            subject_value='m.B.compress',
-            arg1=f'^mode:{mode}+^keep:{"+".join(keep_parts)}',
-            arg2=f'^loss:rhetoric+formatting+redundancy+hedging+style+^f:{fidelity}+^fm:axl-core/v0.7.0',
-            temporal='NOW',
+            subject_value="m.B.compress",
+            arg1=f'^mode:{mode}+^keep:{"+".join(keep_parts)}+^src:input',
+            arg2=f'^loss:rhetoric+formatting+redundancy+hedging+style+^f:{fidelity}+^fm:axl-fidelity/v0.8.0-heuristic',
+            temporal="NOW",
         )
         packets.append(manifest)
 
     return packets
 
 
-# -- Rosetta kernel cache ---------------------------------------
+# -- Rosetta kernel cache ----------------------------------------------------
 
 _KERNEL_CACHE = {"text": None}
 
+
 def _load_kernel() -> str:
-    """Load and cache the Rosetta v3 kernel."""
     if _KERNEL_CACHE["text"]:
         return _KERNEL_CACHE["text"]
-    # Try local file first
     import os
+
     local_paths = [
         "/var/www/axlprotocol/v3",
         os.path.join(os.path.dirname(__file__), "..", "..", "rosetta", "v3.md"),
@@ -494,9 +959,9 @@ def _load_kernel() -> str:
                 return _KERNEL_CACHE["text"]
         except (FileNotFoundError, PermissionError):
             continue
-    # Fallback: fetch from URL
     try:
         import urllib.request
+
         with urllib.request.urlopen("https://axlprotocol.org/v3", timeout=5) as resp:
             _KERNEL_CACHE["text"] = resp.read().decode("utf-8")
             return _KERNEL_CACHE["text"]
@@ -505,25 +970,16 @@ def _load_kernel() -> str:
 
 
 def compress(text: str, agent_id: str = "COMPRESS", include_kernel: bool = True) -> str:
-    """Compress English text to self-bootstrapping AXL v3 output.
-
-    The output starts with the Rosetta v3 kernel, then the packets.
-    Any LLM that receives this output can parse it immediately.
-
-    Args:
-        text: English prose
-        agent_id: Agent ID
-        include_kernel: If True, prepend the Rosetta v3 kernel
-
-    Returns:
-        Self-bootstrapping AXL output (kernel + packets)
-    """
     packets = english_to_v3(text, agent_id)
     packet_lines = "\n".join(emit_v3(p) for p in packets)
 
     if include_kernel:
         kernel = _load_kernel()
         if kernel:
-            directive = "DIRECTIVE: You are now AXL-enabled. Parse the grammar below. Respond ONLY in AXL v3 packet format. Do not respond in English unless the operator explicitly requests decompression.\n\n"
+            directive = (
+                "DIRECTIVE: You are now AXL-enabled. Parse the grammar below. "
+                "Respond ONLY in AXL v3 packet format. Do not respond in English "
+                "unless the operator explicitly requests decompression.\n\n"
+            )
             return directive + kernel + "\n\n---PACKETS---\n" + packet_lines
     return packet_lines

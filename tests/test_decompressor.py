@@ -47,13 +47,12 @@ def test_v3_to_english_basic():
 
 def test_format_grouped():
     claims = [
-        {'op': 'OBS', 'cc': 95, 'tag': '$', 'tag_value': 'BTC', 'claim_text': 'BTC is 67420 (95%)', 'temp': 'NOW', 'raw': ''},
-        {'op': 'OBS', 'cc': 90, 'tag': '@', 'tag_value': 'market', 'claim_text': 'market is active (90%)', 'temp': 'NOW', 'raw': ''},
+        {'op': 'OBS', 'cc': 95, 'tag': '$', 'tag_value': 'BTC', 'base_subject': 'BTC', 'aspect': None, 'claim_text': 'BTC is 67420 (95%)', 'temp': 'NOW', 'raw': ''},
+        {'op': 'OBS', 'cc': 90, 'tag': '@', 'tag_value': 'market', 'base_subject': 'market', 'aspect': None, 'claim_text': 'market is active (90%)', 'temp': 'NOW', 'raw': ''},
     ]
     result = format_decompressed(claims)
-    assert '[Entity]' in result
-    assert '[Financial]' in result
     assert 'BTC' in result
+    assert 'market' in result
 
 
 def test_strip_kernel():
@@ -77,12 +76,42 @@ def test_empty_input():
 def test_decompress_convenience():
     text = 'ID:a|OBS.95|$.revenue|^3.8M|NOW'
     result = decompress(text)
-    assert 'Financial' in result
     assert 'revenue' in result
 
 
 def test_meta_fields():
     r = parse_packet('ID:test|OBS.95|$.revenue|^3800000|NOW')
     assert r is not None
-    # Meta may or may not be present
     assert isinstance(r.get('meta', {}), dict)
+
+
+def test_single_labelled_arg2_survives():
+    packet = "ID:COMPRESS|OBS.90|@company.revenue||^amt:5M+^date:2025|NOW"
+    parsed = parse_packet(packet)
+    assert parsed is not None
+    assert parsed["arg2"] == "amt: 5M, date: 2025"
+    assert parsed["base_subject"] == "company"
+    assert parsed["aspect"] == "revenue"
+
+
+def test_hierarchical_subject_sections():
+    text = "\n".join(
+        [
+            "ID:COMPRESS|OBS.90|@Sales_team.targets||^pct:30%|NOW",
+            "ID:COMPRESS|OBS.90|@Engineering_team.features||^count:5+~state:new|NOW",
+            "ID:COMPRESS|OBS.90|@Marketing.campaigns||^count:3|NOW",
+        ]
+    )
+    out = decompress(text)
+    assert "[Sales team]" in out
+    assert "targets: pct: 30%" in out
+    assert "[Engineering team]" in out
+    assert "features: count: 5, state: new" in out
+    assert "[Marketing]" in out
+
+
+def test_date_not_treated_as_meta_when_in_arg2_position():
+    packet = "ID:COMPRESS|PRD.75|^revenue||^amt:5M+^date:2025|NOW"
+    parsed = parse_packet(packet)
+    assert parsed is not None
+    assert parsed["arg2"] == "amt: 5M, date: 2025"
