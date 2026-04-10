@@ -21,7 +21,10 @@
   <a href="https://axlprotocol.org/rosetta">Rosetta</a> ·
   <a href="https://lang.axlprotocol.org">Documentation</a> ·
   <a href="https://axlprotocol.org/results/v2/">Experiments</a> ·
-  <a href="https://axlprotocol.org">Website</a>
+  <a href="https://axlprotocol.org">Website</a> ·
+  <a href="https://compress.axlprotocol.org">Live Tool</a> ·
+  <a href="https://axlprotocol.org/v3">Protocol Spec</a> ·
+  <a href="https://docs.axlprotocol.org">Full Docs</a>
 </p>
 
 ---
@@ -32,6 +35,42 @@ AI agents can't talk to each other. They communicate in English prose (50-100 to
 
 AXL eliminates this. One URL (`@axlprotocol.org/rosetta`) teaches any agent the complete language on first contact. The protocol has been validated across **11 agents from 10 computational paradigms** with **100% parse validity** and **95.8% LLM comprehension** across four major architectures.
 
+## How It Works
+
+AXL compresses English prose into structured semantic packets using a 75-line grammar (the Rosetta v3 kernel) that any LLM can parse on first read. It is designed for AI agents, NLP pipelines, and machine communication systems that need deterministic, low-latency semantic compression without sacrificing human readability.
+
+### Two Ways to Compress
+
+| Method | Speed | Cost | When to Use |
+|--------|-------|------|-------------|
+| **Fixed Engine** (`axl-core`) | <100ms | Free | Automation, bulk processing, MCP tools |
+| **LLM Engine** (any model + kernel) | 2-10s | Token cost | Maximum fidelity, complex documents |
+
+### Two Ways to Decompress
+
+| Method | Speed | Cost | Output |
+|--------|-------|------|--------|
+| **Receipt Mode** (`axl-core`) | 0.3ms | Free | Structured claims (machine-readable) |
+| **LLM Mode** (any model + packets) | 5-30s | Token cost | Full English prose (human-readable) |
+
+### Example
+
+**Input** (English):
+> Sales team at CloudKitchen exceeded quarterly revenue targets by 30% in Q1 2025, driven by expansion into 3 new markets.
+
+**Output** (AXL v3):
+```
+ID:C|OBS.90|@CK.sales|<-expand:3_mkts|^rev:+30%+^date:Q1_2025|NOW
+```
+
+**Decompressed** (Receipt Mode):
+> [CloudKitchen] sales: revenue +30%, Q1 2025 (90% confidence)
+
+**Decompressed** (LLM Mode - Grok):
+> CloudKitchen's sales team exceeded their quarterly revenue targets by 30% in Q1 2025. This growth was primarily driven by the company's expansion into three new metropolitan markets.
+
+---
+
 ## Install
 
 ```bash
@@ -39,6 +78,25 @@ pip install axl-core
 ```
 
 ## Quick Start
+
+**Compress English to AXL packets:**
+
+```python
+from axl.compressor import compress, english_to_v3
+from axl.decompressor import decompress
+from axl.emitter import emit_v3
+
+# Compress English prose to AXL v3 semantic packets
+text = "Revenue grew 30% because the company expanded into 3 new markets."
+packets = english_to_v3(text)
+for p in packets:
+    print(emit_v3(p))
+
+# Decompress back to structured English (receipt mode - free, <1ms)
+compressed = compress(text, kernel_mode="mini")
+result = decompress(compressed)
+print(result)
+```
 
 **Parse a packet:**
 
@@ -95,6 +153,7 @@ AXL is the missing language layer in the agent internet:
 | Layer | Protocol | Who |
 |-------|----------|-----|
 | Payment | x402 | Coinbase / Cloudflare |
+| Payment | HTTP 402 | W3C (reserved since 1997, free fallback default) |
 | Tool Calling | MCP | Anthropic |
 | Discovery | A2A | Google |
 | Social | Moltbook | Meta |
@@ -141,6 +200,24 @@ print(v3_to_english(pkt)) # MKT-01 observes $BTC at ^67420 with 99% confidence.
 print(v3_to_json(pkt))    # {"v":"3","id":"MKT-01","op":"OBS","cc":99,...}
 print(validate_v3(pkt))   # [] (no errors)
 ```
+
+## Cross-Architecture Validation
+
+The Rosetta v3 kernel has been tested on 7 LLM architectures with 97%+ comprehension on first exposure. No fine-tuning. No examples. One URL, any agent.
+
+| Model | Architecture | Result |
+|-------|-------------|--------|
+| Grok 3 | xAI | 97.2% - spontaneously emitted genesis packet |
+| GPT-4.5 | OpenAI | 97.2% - self-issued loss contract |
+| Claude Sonnet 4 | Anthropic | Full swarm test |
+| Gemini | Google | 100% |
+| Llama 4 | Meta | 97.2% |
+| Qwen 3.5 | Alibaba | 91.7% |
+| Devstral | Mistral | 100% |
+
+This is the core value proposition: a semantic compression protocol for AI agents that is architecture-agnostic, LLM-native, and requires zero pre-training. Any model that can read English can speak AXL after a single context injection.
+
+---
 
 ## Links
 

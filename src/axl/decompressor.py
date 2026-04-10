@@ -140,6 +140,7 @@ def parse_packet(line: str) -> Optional[dict]:
             "aspect": aspect,
             "arg1": _clean_arg(arg1),
             "arg2": _clean_arg(arg2),
+            "_raw_arg2": arg2,
             "temp": temp,
             "meta": meta,
             "raw": line,
@@ -208,19 +209,84 @@ def _claim_text(parsed: dict) -> str:
     return f"{label}: {arg2 or arg1 or 'noted'} ({cc}% confidence)"
 
 
+def _extract_ontology(packets: list[dict]) -> dict[str, str]:
+    """Extract alias->full_name mappings from ontology manifest."""
+    aliases: dict[str, str] = {}
+    for pkt in packets:
+        subj = pkt.get("tag_value", "")
+        if not subj.startswith("m.O."):
+            continue
+        # Parse ^df:ALIAS=FullName+ALIAS2=FullName2
+        arg2_raw = pkt.get("_raw_arg2", "") or ""
+        if not arg2_raw:
+            continue
+        for part in arg2_raw.split("+"):
+            part = part.strip()
+            if part.startswith("^df:"):
+                part = part[4:]
+            if "=" in part:
+                alias, full = part.split("=", 1)
+                alias = alias.strip()
+                full = full.strip()
+                if alias and full:
+                    aliases[alias.lower()] = full
+    return aliases
+
+
+def _expand_alias(
+    value: str, aliases: dict[str, str],
+) -> str:
+    """Expand entity aliases in a subject value."""
+    if not aliases:
+        return value
+    clean = value.replace("_", " ")
+    # Direct match: "CK" -> "CloudKitchen"
+    if clean.lower() in aliases:
+        return aliases[clean.lower()]
+    # Dotted: "CK.sales" -> "CloudKitchen sales"
+    if "." in clean:
+        prefix, rest = clean.split(".", 1)
+        expanded = aliases.get(prefix.lower())
+        if expanded:
+            return f"{expanded} {rest}"
+    return clean
+
+
 def v3_to_english(packets_text: str) -> list[dict]:
     text = strip_kernel(packets_text)
     if not text:
         return []
 
-    claims = []
+    # First pass: parse all packets
+    all_parsed = []
     for line in text.split("\n"):
         line = line.strip()
         if not line:
             continue
         parsed = parse_packet(line)
-        if not parsed:
+        if parsed:
+            all_parsed.append(parsed)
+
+    # Extract ontology aliases
+    aliases = _extract_ontology(all_parsed)
+
+    # Second pass: build claims, expand aliases, skip manifests
+    claims = []
+    for parsed in all_parsed:
+        subj = parsed.get("tag_value", "")
+        # Skip manifest packets
+        if subj.startswith("m.O.") or subj.startswith("m.B."):
             continue
+
+        # Expand aliases in subject
+        if aliases:
+            parsed["tag_value"] = _expand_alias(
+                parsed["tag_value"], aliases,
+            )
+            parsed["base_subject"] = _expand_alias(
+                parsed.get("base_subject", ""), aliases,
+            )
+
         claim_text = _claim_text(parsed)
         claim_text = re.sub(r"\s+", " ", claim_text).strip()
         claims.append(

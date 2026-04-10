@@ -1,29 +1,17 @@
-"""AXL Compressor v0.9.0
+"""AXL Compressor v0.8.1
 
-Dense semantic compression with entity aliasing.
-
-Architecture:
-  Pass 1 - Scan full document, build entity registry with short aliases
-  Pass 2 - Extract facts per sentence using quality-fixed pipeline
-  Pass 3 - Pack same-subject values into single ARG2, compress evidence
-  Pass 4 - Emit compact packets + ontology manifest + bundle manifest
-
-Quality fixes preserved from v0.8.x:
+Focused fixes for the known v3 extraction failures, plus density recovery:
 - DATE/year guard before number compaction
 - word-scale number normalization ("5 million dollars" -> "5M")
 - pronoun and numeric subject suppression
 - semantic subject ranking (teams/orgs outrank numbers)
-- safer evidence fallback (no generic prepositions as causal)
-- no invalid synthetic MRG packets
+- atomic fact splitting (one packet per value slot)
+- temporal/date duplication per atomic fact instead of flat unrelated ARG2 joins
+- safer evidence fallback (avoid treating generic prepositions like "by 2025" as causal)
+- disable invalid synthetic MRG packets
 
-Density improvements (new in v0.9.0):
-- Entity registry with 2-3 char aliases (CloudKitchen -> CK)
-- Short agent ID ("C" not "COMPRESS")
-- Compressed evidence (verb:object, max 30 chars)
-- Same-subject value packing (all values in one ARG2)
-- Role-labeled values (^rev:8.5M not ^amt:8.5M)
-- Mini kernel (741 chars vs 5,853 full)
-- Ontology manifest with entity->alias mappings
+This module keeps the current packet grammar intact. It only changes the compressor's
+heuristics so the output respects the existing 6-field contract more faithfully.
 """
 
 from __future__ import annotations
@@ -36,106 +24,6 @@ import spacy
 
 from axl.emitter import emit_v3
 from axl.models import Operation, TagType, V3Packet
-
-# -- Abbreviation dictionary -------------------------------------------------
-
-_ABBREV = {
-    "revenue": "rev", "technology": "tech", "operations": "ops",
-    "engineering": "eng", "marketing": "mkt", "management": "mgmt",
-    "development": "dev", "performance": "perf", "production": "prod",
-    "infrastructure": "infra", "acquisition": "acq", "valuation": "val",
-    "investment": "inv", "economics": "econ", "analysis": "anl",
-    "commission": "comm", "competition": "comp", "expansion": "exp",
-    "financial": "fin", "growth": "grw", "partnership": "prtn",
-    "platform": "plat", "projection": "proj", "recommendation": "rec",
-    "subscription": "sub", "turnover": "turn", "facility": "fac",
-    "customer": "cust", "employee": "emp", "percentage": "pct",
-    "approximately": "approx", "metropolitan": "metro",
-    "penetration": "pen", "satisfaction": "sat", "retention": "ret",
-    "intelligence": "intel", "prediction": "pred",
-}
-
-
-def _abbr(word: str, max_len: int = 10) -> str:
-    """Abbreviate a word using the dictionary, or truncate."""
-    w = word.lower().strip()
-    if w in _ABBREV:
-        return _ABBREV[w]
-    if len(w) <= max_len:
-        return w
-    return w[:max_len]
-
-
-# -- Entity Registry --------------------------------------------------------
-
-
-class EntityRegistry:
-    """Assigns short 2-3 char aliases to named entities."""
-
-    def __init__(self):
-        self._to_alias: dict[str, str] = {}
-        self._to_full: dict[str, str] = {}
-        self._used: set[str] = set()
-
-    def get(self, full_name: str) -> Optional[str]:
-        return self._to_alias.get(full_name.lower().strip())
-
-    def register(self, full_name: str) -> str:
-        key = full_name.lower().strip()
-        if key in self._to_alias:
-            return self._to_alias[key]
-        alias = self._make_alias(full_name)
-        self._to_alias[key] = alias
-        self._to_full[alias] = full_name
-        self._used.add(alias.lower())
-        return alias
-
-    def _make_alias(self, name: str) -> str:
-        words = name.split()
-        # Single word: first 2-3 uppercase chars
-        if len(words) == 1:
-            for n in (2, 3, 4):
-                c = name[:n].upper()
-                if c.lower() not in self._used:
-                    return c
-            return name[:5].upper()
-        # Multi-word: initials
-        initials = "".join(
-            w[0] for w in words if w and w[0].isalpha()
-        ).upper()
-        if len(initials) >= 2 and initials.lower() not in self._used:
-            return initials[:3]
-        # Fallback: first word abbreviated
-        for n in (3, 4, 5):
-            c = words[0][:n].upper()
-            if c.lower() not in self._used:
-                return c
-        return words[0][:4].upper()
-
-    def has_aliases(self) -> bool:
-        return len(self._to_alias) > 0
-
-    def ontology_string(self) -> str:
-        """Produce ontology definition string for manifest."""
-        parts = []
-        for alias, full in sorted(self._to_full.items()):
-            parts.append(f"{alias}={full}")
-        return "+".join(parts)
-
-
-def _build_entity_registry(doc) -> EntityRegistry:
-    """Scan entire document and register all named entities."""
-    reg = EntityRegistry()
-    for ent in doc.ents:
-        if ent.label_ in (
-            "PERSON", "ORG", "GPE", "PRODUCT",
-            "WORK_OF_ART", "FAC", "NORP",
-        ):
-            name = ent.text.strip()
-            if len(name) > 2:
-                reg.register(name)
-    return reg
-
 
 # -- spaCy singleton ---------------------------------------------------------
 
@@ -515,8 +403,9 @@ def extract_evidence(text: str, doc=None) -> Optional[str]:
     for pattern, prefix in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            evidence = match.group(1).strip()[:80]
-            evidence = _compress_evidence_text(evidence)
+            evidence = match.group(1).strip()[:120]
+            evidence = re.sub(r"[^\w\s.+-]", "", evidence).strip()
+            evidence = _truncate_word(evidence.replace(" ", "_"), 100)
             if evidence:
                 return f"{prefix}{evidence}"
 
@@ -524,47 +413,23 @@ def extract_evidence(text: str, doc=None) -> Optional[str]:
         return None
 
     for token in doc:
+        # because/since/as subordinate clause
         if token.dep_ == "advcl":
-            marks = {
-                child.lemma_.lower()
-                for child in token.children
-                if child.dep_ == "mark"
-            }
+            marks = {child.lemma_.lower() for child in token.children if child.dep_ == "mark"}
             if marks & _CAUSAL_MARKERS:
                 subtree = " ".join(t.text for t in token.subtree)
-                compressed = _compress_evidence_text(subtree)
-                if compressed and len(compressed) > 3:
-                    return f"<-{compressed}"
+                clean = _clean_token_value(re.sub(r"[^\w\s.+-]", "", subtree), max_len=80)
+                if clean and len(clean) > 3:
+                    return f"<-{clean}"
 
-        if (token.dep_ == "prep"
-                and token.lemma_.lower() in _PREP_CAUSAL_HEADS):
+        # according to / based on / due to style prepositional evidence only
+        if token.dep_ == "prep" and token.lemma_.lower() in _PREP_CAUSAL_HEADS:
             subtree = " ".join(t.text for t in token.subtree)
-            compressed = _compress_evidence_text(subtree)
-            if compressed and len(compressed) > 3:
-                return f"<-{compressed}"
+            clean = _clean_token_value(re.sub(r"[^\w\s.+-]", "", subtree), max_len=80)
+            if clean and len(clean) > 3:
+                return f"<-{clean}"
 
     return None
-
-
-def _compress_evidence_text(text: str) -> str:
-    """Compress a causal clause to abbreviated form, max 30 chars."""
-    text = re.sub(r"[^\w\s.+-]", "", text).strip()
-    words = text.split()
-    if not words:
-        return ""
-    # Abbreviate each word, skip stopwords
-    stops = {
-        "the", "a", "an", "of", "in", "to", "for", "and",
-        "or", "is", "was", "were", "are", "by", "with",
-        "from", "into", "that", "this", "its", "their",
-    }
-    parts = []
-    for w in words:
-        if w.lower() in stops:
-            continue
-        parts.append(_abbr(w, 8))
-    result = "_".join(parts)
-    return _truncate_word(result, 28)
 
 
 # -- Subject extraction ------------------------------------------------------
@@ -834,7 +699,12 @@ def infer_role_label(ent, doc) -> Optional[str]:
 
 
 def collect_role_qualifiers(doc) -> dict[str, list[str]]:
-    """Attach adjectives to their semantic role instead of taking only the first ADJ."""
+    """Map adjective qualifiers to their semantic role.
+
+    Role-tagged qualifiers let us keep one packed packet per clause while still
+    preserving which noun the adjective modified. We only emit a qualifier when it
+    adds real semantic signal and we cap it later to avoid ratio collapse.
+    """
     out: dict[str, list[str]] = defaultdict(list)
     for tok in doc:
         if tok.pos_ != "ADJ" or tok.dep_ not in ("amod", "acomp", "attr"):
@@ -845,19 +715,14 @@ def collect_role_qualifiers(doc) -> dict[str, list[str]]:
         if head.pos_ not in ("NOUN", "PROPN"):
             continue
         role = _clean_token_value(head.lemma_ or head.text, max_len=20).lower()
+        qual = _clean_token_value(tok.lemma_.lower(), max_len=16)
+        if not qual:
+            continue
         if role:
-            qual = _clean_token_value(tok.lemma_.lower(), max_len=16)
-            out[role].append(f"~state:{qual}")
+            out[role].append(f"~{role}:{qual}")
+        else:
+            out["__generic__"].append(f"~state:{qual}")
     return out
-
-
-def _join_subject_role(base_subject: str, role: Optional[str]) -> str:
-    if not role:
-        return base_subject
-    parts = {p.lower() for p in base_subject.split(".")}
-    if role.lower() in parts:
-        return base_subject
-    return _truncate_word(f"{base_subject}.{role}", 48)
 
 
 def _dedupe_preserve_order(items: Iterable[str]) -> list[str]:
@@ -870,16 +735,185 @@ def _dedupe_preserve_order(items: Iterable[str]) -> list[str]:
     return out
 
 
-def extract_packed_arg2(doc, registry: Optional[EntityRegistry] = None) -> str:
-    """Pack ALL values from a sentence into a single dense ARG2.
+_CLAUSE_DEPS = {"ROOT", "conj", "advcl", "ccomp", "xcomp", "relcl", "parataxis"}
+_MAX_PRIMARY_FACTS_PER_PACKET = 3
+_MAX_ARG2_CHARS = 64
 
-    v0.9.0 strategy: one packet per sentence, all values packed.
-    Uses role labels (^rev:8.5M) instead of type labels (^amt:8.5M)
-    when a semantic role is available.
+
+def _find_clause_anchor(token):
+    cur = token
+    while cur.head is not cur:
+        if cur.dep_ in _CLAUSE_DEPS:
+            return cur
+        cur = cur.head
+    return cur
+
+
+def _clean_subject_from_head(doc, head) -> Optional[tuple[TagType, str]]:
+    span = doc[head.left_edge.i : head.right_edge.i + 1]
+    text = span.text.strip()
+    if not text:
+        return None
+    if _is_pronoun_like(text) or _is_weak_subject(text):
+        return None
+    if all(tok.like_num or tok.is_punct for tok in span):
+        return None
+    tag, _ = classify_tag(text)
+    clean = _clean_token_value(text, max_len=36, keep=".-")
+    if not clean or clean.isdigit():
+        return None
+    return tag, clean
+
+
+def _extract_clause_subject(doc, anchor, fallback: tuple[TagType, str]) -> tuple[TagType, str]:
+    """Find the local subject for a clause so multi-subject sentences can split safely."""
+    search_anchors = [anchor]
+    if anchor.dep_ == "conj" and anchor.head is not anchor:
+        search_anchors.append(anchor.head)
+
+    for root in search_anchors:
+        for child in root.children:
+            if child.dep_ in ("nsubj", "nsubjpass", "csubj", "attr"):
+                candidate = _clean_subject_from_head(doc, child)
+                if candidate:
+                    return candidate
+    return fallback
+
+
+def _subject_contains_role(subject_value: str, role: Optional[str]) -> bool:
+    if not role:
+        return False
+    parts = {p.lower() for p in re.split(r"[._]", subject_value) if p}
+    return role.lower() in parts
+
+
+def _render_numeric_atoms(facts: list[dict], subject_value: str) -> list[str]:
+    """Render numeric facts into compact but semantically labeled atoms.
+
+    Heuristic:
+    - Single fact whose role is already in the subject -> use short typed label (^amt/^pct/^count)
+    - Otherwise use the role name (^revenue:5M, ^targets:30%)
+    - Only append the numeric type suffix when the same role appears with multiple value types
     """
-    qualifiers = collect_role_qualifiers(doc)
-    parts: list[str] = []
-    seen: set[str] = set()
+    role_prefixes: dict[str, set[str]] = defaultdict(set)
+    for fact in facts:
+        role = fact.get("role")
+        if isinstance(role, str) and role:
+            role_prefixes[role].add(str(fact["prefix"]))
+
+    single_fact = len(facts) == 1
+    atoms: list[str] = []
+    for fact in facts:
+        role = fact.get("role")
+        prefix = str(fact["prefix"])
+        value = str(fact["value"])
+        if isinstance(role, str) and role:
+            if single_fact and _subject_contains_role(subject_value, role):
+                label = prefix
+            elif len(role_prefixes[role]) > 1:
+                label = f"{role}_{prefix}"
+            else:
+                label = role
+            label = _clean_token_value(label, max_len=24, keep=".-").lower()
+            atoms.append(f"^{label}:{value}")
+        else:
+            atoms.append(f"^{prefix}:{value}")
+    return _dedupe_preserve_order(atoms)
+
+
+def _best_cluster_qualifier(
+    facts: list[dict],
+    qualifiers_by_role: dict[str, list[str]],
+) -> Optional[str]:
+    roles = _dedupe_preserve_order(
+        [str(f["role"]) for f in facts if isinstance(f.get("role"), str) and f.get("role")]
+    )
+    for role in roles:
+        quals = qualifiers_by_role.get(role, [])
+        if not quals:
+            continue
+        qual = quals[0]
+        # If there is only one role in the packet, the role is already implicit.
+        if len(roles) <= 1 and qual.startswith("~") and ":" in qual:
+            _, rest = qual.split(":", 1)
+            return f"~state:{rest}"
+        return qual
+    generic = qualifiers_by_role.get("__generic__", [])
+    return generic[0] if generic else None
+
+
+def _cluster_center(facts: list[dict]) -> float:
+    if not facts:
+        return 0.0
+    return sum(float(f["pos"]) for f in facts) / len(facts)
+
+
+def _estimate_arg2_parts(
+    facts: list[dict],
+    subject_value: str,
+    qualifiers_by_role: dict[str, list[str]],
+    reserve_date_len: int = 0,
+) -> list[str]:
+    parts = list(_render_numeric_atoms(facts, subject_value))
+    qual = _best_cluster_qualifier(facts, qualifiers_by_role)
+    if qual and qual not in parts:
+        parts.append(qual)
+    if reserve_date_len:
+        parts.append("D" * reserve_date_len)
+    return parts
+
+
+def _can_merge_fact(
+    current_facts: list[dict],
+    fact: dict,
+    subject_value: str,
+    qualifiers_by_role: dict[str, list[str]],
+    reserve_date_len: int = 0,
+) -> bool:
+    if len(current_facts) >= _MAX_PRIMARY_FACTS_PER_PACKET:
+        return False
+
+    for existing in current_facts:
+        same_role = existing.get("role") == fact.get("role")
+        same_prefix = existing.get("prefix") == fact.get("prefix")
+        if same_role and same_prefix:
+            return False
+        if not existing.get("role") and not fact.get("role") and same_prefix:
+            return False
+
+    candidate_facts = current_facts + [fact]
+    parts = _estimate_arg2_parts(
+        candidate_facts,
+        subject_value=subject_value,
+        qualifiers_by_role=qualifiers_by_role,
+        reserve_date_len=reserve_date_len,
+    )
+    approx_len = sum(len(p) for p in parts) + max(0, len(parts) - 1)
+    return approx_len <= _MAX_ARG2_CHARS
+
+
+def extract_atomic_payloads(
+    doc,
+    base_tag: TagType,
+    base_subject: str,
+) -> list[tuple[TagType, str, str]]:
+    """Pack facts at the clause level instead of one packet per value.
+
+    The v0.8.0 regression came from splitting every numeric slot into its own packet.
+    This revision keeps the extraction fixes but restores density with a clause-level
+    packing heuristic:
+      - pack up to 3 compatible primary facts into one packet
+      - label roles inside ARG2 so the sentence can stay flat without losing semantics
+      - attach dates to the nearest packed fact instead of spawning standalone date packets
+      - split only when we see a new clause/subject, repeated same-role same-type facts,
+        or an ARG2 that would grow past the compactness budget
+    """
+    qualifiers_by_role = collect_role_qualifiers(doc)
+    fallback_subject = (base_tag, base_subject)
+
+    clause_subjects: dict[int, tuple[TagType, str]] = {}
+    facts: list[dict] = []
+    date_items: list[dict] = []
 
     for ent in doc.ents:
         if ent.label_ not in NER_TO_VALUE_PREFIX:
@@ -888,31 +922,92 @@ def extract_packed_arg2(doc, registry: Optional[EntityRegistry] = None) -> str:
         if not normalized:
             continue
 
-        prefix = NER_TO_VALUE_PREFIX[ent.label_]
-        role = infer_role_label(ent, doc)
+        anchor = _find_clause_anchor(ent.root)
+        clause_key = int(anchor.i)
+        if clause_key not in clause_subjects:
+            clause_subjects[clause_key] = _extract_clause_subject(doc, anchor, fallback_subject)
 
-        # Use role as label if available, else type prefix
-        if role:
-            label = _abbr(role, 8)
-        else:
-            label = prefix
+        if ent.label_ in ("DATE", "TIME"):
+            date_items.append({
+                "clause": clause_key,
+                "pos": ent.start,
+                "atom": f"^date:{normalized}",
+            })
+            continue
 
-        atom = f"^{label}:{normalized}"
-        if atom not in seen:
-            seen.add(atom)
-            parts.append(atom)
+        facts.append({
+            "clause": clause_key,
+            "pos": ent.start,
+            "role": infer_role_label(ent, doc),
+            "prefix": NER_TO_VALUE_PREFIX[ent.label_],
+            "value": normalized,
+            "subject_tag": clause_subjects[clause_key][0],
+            "subject_value": clause_subjects[clause_key][1],
+        })
 
-    # Add first qualifier if budget allows
-    for role, quals in qualifiers.items():
-        if quals and len("+".join(parts)) < 80:
-            q = quals[0]
-            if q not in seen:
-                parts.append(q)
-            break
+    payloads: list[tuple[TagType, str, str]] = []
 
-    if not parts:
-        return ""
-    return "+".join(parts[:6])
+    grouped_facts: dict[tuple[int, TagType, str], list[dict]] = defaultdict(list)
+    for fact in facts:
+        key = (int(fact["clause"]), fact["subject_tag"], str(fact["subject_value"]))
+        grouped_facts[key].append(fact)
+
+    for (clause_key, subject_tag, subject_value), group_facts in grouped_facts.items():
+        clause_dates = [d for d in date_items if int(d["clause"]) == clause_key]
+        reserve_date_len = max((len(str(d["atom"])) for d in clause_dates), default=0)
+
+        clusters: list[dict] = []
+        for fact in sorted(group_facts, key=lambda item: int(item["pos"])):
+            if clusters and _can_merge_fact(
+                clusters[-1]["facts"],
+                fact,
+                subject_value=subject_value,
+                qualifiers_by_role=qualifiers_by_role,
+                reserve_date_len=reserve_date_len,
+            ):
+                clusters[-1]["facts"].append(fact)
+            else:
+                clusters.append({"facts": [fact], "dates": []})
+
+        for date_item in clause_dates:
+            if not clusters:
+                break
+            nearest = min(
+                clusters,
+                key=lambda cluster: abs(
+                    _cluster_center(cluster["facts"]) - float(date_item["pos"])
+                ),
+            )
+            if date_item["atom"] not in nearest["dates"]:
+                nearest["dates"].append(str(date_item["atom"]))
+
+        for cluster in clusters:
+            parts = list(_render_numeric_atoms(cluster["facts"], subject_value))
+            qual = _best_cluster_qualifier(cluster["facts"], qualifiers_by_role)
+            if qual and qual not in parts:
+                parts.append(qual)
+            for date_atom in cluster["dates"][:1]:
+                if date_atom not in parts:
+                    parts.append(date_atom)
+            if parts:
+                payloads.append((subject_tag, subject_value, "+".join(parts)))
+
+    # If a sentence only contributed dates, keep one date packet rather than dropping it.
+    if not payloads and date_items:
+        payloads.append((base_tag, base_subject, str(date_items[0]["atom"])))
+
+    # No numeric/date entities but a semantic adjective exists - emit compact state.
+    if not payloads:
+        for role, quals in qualifiers_by_role.items():
+            if quals:
+                qual = quals[0]
+                if role != "__generic__" and qual.startswith("~") and ":" in qual:
+                    _, rest = qual.split(":", 1)
+                    qual = f"~state:{rest}"
+                payloads.append((base_tag, base_subject, qual))
+                break
+
+    return payloads
 
 
 def _seek_request_arg(sent_text: str) -> str:
@@ -934,109 +1029,11 @@ def _seek_target_arg(sent_text: str) -> str:
 # -- Main pipeline -----------------------------------------------------------
 
 
-def _alias_subject(
-    tag: TagType, value: str, registry: EntityRegistry,
-) -> str:
-    """Compress a subject using entity aliases.
-
-    Only registered entities get aliased. Non-entity subjects
-    keep their original text (cleaned and truncated) so the
-    decompressor can produce readable section headers.
-    """
-    full_text = value.replace("_", " ")
-
-    # Exact match: registered entity -> short alias
-    alias = registry.get(full_text)
-    if alias:
-        return alias
-
-    # Partial match: subject contains a registered entity
-    words = full_text.split()
-    for w in words:
-        a = registry.get(w)
-        if a:
-            remaining = [
-                x for x in words if x.lower() != w.lower()
-            ]
-            if remaining:
-                role = "_".join(remaining)[:12]
-                return f"{a}.{role}"
-            return a
-
-    # No entity match: keep original, just truncate
-    return _truncate_word(value, 30)
-
-
-def _merge_same_subject_packets(
-    packets: list[V3Packet],
-) -> list[V3Packet]:
-    """Merge adjacent packets with same subject+operation+temporal."""
-    if len(packets) <= 1:
-        return packets
-
-    merged: list[V3Packet] = []
-    for pkt in packets:
-        if not merged:
-            merged.append(pkt)
-            continue
-
-        prev = merged[-1]
-        same_subj = (
-            prev.subject_tag == pkt.subject_tag
-            and prev.subject_value == pkt.subject_value
-        )
-        same_op = prev.operation == pkt.operation
-        same_temp = prev.temporal == pkt.temporal
-        prev_arg2_len = len(prev.arg2 or "")
-
-        if same_subj and same_op and same_temp and prev_arg2_len < 90:
-            # Merge ARG2
-            if pkt.arg2:
-                if prev.arg2:
-                    combined = f"{prev.arg2}+{pkt.arg2}"
-                    if len(combined) <= 100:
-                        merged[-1] = V3Packet(
-                            id=prev.id,
-                            operation=prev.operation,
-                            confidence=max(prev.confidence, pkt.confidence),
-                            subject_tag=prev.subject_tag,
-                            subject_value=prev.subject_value,
-                            arg1=prev.arg1 or pkt.arg1,
-                            arg2=combined,
-                            temporal=prev.temporal,
-                        )
-                        continue
-                else:
-                    merged[-1] = V3Packet(
-                        id=prev.id,
-                        operation=prev.operation,
-                        confidence=max(prev.confidence, pkt.confidence),
-                        subject_tag=prev.subject_tag,
-                        subject_value=prev.subject_value,
-                        arg1=prev.arg1 or pkt.arg1,
-                        arg2=pkt.arg2,
-                        temporal=prev.temporal,
-                    )
-                    continue
-
-        merged.append(pkt)
-
-    return merged
-
-
-def english_to_v3(
-    text: str, agent_id: str = "C",
-) -> list[V3Packet]:
-    """Two-pass compression: registry scan then packed emission."""
+def english_to_v3(text: str, agent_id: str = "COMPRESS") -> list[V3Packet]:
     nlp = _get_nlp()
     doc = nlp(text)
-
-    # PASS 1: Build entity registry from full document
-    registry = _build_entity_registry(doc)
-
-    # PASS 2: Extract and emit packed packets
     packets: list[V3Packet] = []
-    ctx_subj: Optional[tuple[TagType, str]] = None
+    context_subject: Optional[tuple[TagType, str]] = None
 
     for sent in doc.sents:
         sent_text = sent.text.strip()
@@ -1047,122 +1044,106 @@ def english_to_v3(
         operation = classify_operation(sent_text)
 
         has_nums = bool(
-            sent_doc.ents
-            and any(
-                e.label_ in (
-                    "MONEY", "QUANTITY", "CARDINAL",
-                    "PERCENT", "DATE",
-                )
+            sent_doc.ents and any(
+                e.label_ in ("MONEY", "QUANTITY", "CARDINAL", "PERCENT", "DATE")
                 for e in sent_doc.ents
             )
         )
         has_ents = bool(
-            sent_doc.ents
-            and any(
-                e.label_ in ("PERSON", "ORG", "GPE")
-                for e in sent_doc.ents
-            )
+            sent_doc.ents and any(e.label_ in ("PERSON", "ORG", "GPE") for e in sent_doc.ents)
         )
-        confidence = score_confidence(
-            sent_text, operation, has_nums, has_ents,
-        )
+        confidence = score_confidence(sent_text, operation, has_nums, has_ents)
 
-        tag_type, raw_subject = extract_subject(
-            sent_doc, sent_text, operation, ctx_subj,
-        )
+        tag_type, subject_value = extract_subject(sent_doc, sent_text, operation, context_subject)
         if tag_type == TagType.ENTITY:
-            ctx_subj = (tag_type, raw_subject)
-
-        # Compress subject using entity aliases
-        subject_value = _alias_subject(tag_type, raw_subject, registry)
+            context_subject = (tag_type, subject_value)
 
         temporal = extract_temporal(sent_text)
         evidence = extract_evidence(sent_text, sent_doc)
 
         if operation == Operation.SEK:
-            packets.append(V3Packet(
-                id=agent_id,
-                operation=operation,
-                confidence=confidence,
-                subject_tag=tag_type,
-                subject_value=subject_value,
-                arg1=_seek_target_arg(sent_text),
-                arg2=_seek_request_arg(sent_text),
-                temporal=temporal,
-            ))
+            packets.append(
+                V3Packet(
+                    id=agent_id,
+                    operation=operation,
+                    confidence=confidence,
+                    subject_tag=tag_type,
+                    subject_value=subject_value,
+                    arg1=_seek_target_arg(sent_text),
+                    arg2=_seek_request_arg(sent_text),
+                    temporal=temporal,
+                )
+            )
             continue
 
-        # Pack ALL values from sentence into one ARG2
-        arg2 = extract_packed_arg2(sent_doc, registry)
-
-        packets.append(V3Packet(
-            id=agent_id,
-            operation=operation,
-            confidence=confidence,
-            subject_tag=tag_type,
-            subject_value=subject_value,
-            arg1=evidence,
-            arg2=arg2 or None,
-            temporal=temporal,
-        ))
-
-    # PASS 3: Merge adjacent same-subject packets
-    packets = _merge_same_subject_packets(packets)
-
-    # PASS 4: Add manifests
-    # Ontology manifest with entity registry
-    if registry.has_aliases():
-        onto_str = registry.ontology_string()
-        if len(onto_str) <= 200:
-            onto = V3Packet(
-                id="axl-core",
-                operation=Operation.OBS,
-                confidence=99,
-                subject_tag=TagType.ENTITY,
-                subject_value="m.O.doc",
-                arg1=None,
-                arg2=f"^df:{onto_str}",
-                temporal="NOW",
+        payloads = extract_atomic_payloads(sent_doc, tag_type, subject_value)
+        if payloads:
+            for payload_tag, subject_variant, arg2 in payloads:
+                packets.append(
+                    V3Packet(
+                        id=agent_id,
+                        operation=operation,
+                        confidence=confidence,
+                        subject_tag=payload_tag,
+                        subject_value=subject_variant,
+                        arg1=evidence,
+                        arg2=arg2,
+                        temporal=temporal,
+                    )
+                )
+        else:
+            packets.append(
+                V3Packet(
+                    id=agent_id,
+                    operation=operation,
+                    confidence=confidence,
+                    subject_tag=tag_type,
+                    subject_value=subject_value,
+                    arg1=evidence,
+                    arg2=None,
+                    temporal=temporal,
+                )
             )
-            packets.insert(0, onto)
 
-    # Bundle manifest
+    # Intentionally no synthetic MRG here.
+    # v0.7.0 created invalid RE targets like RE:5+3+30% or RE:subject_values,
+    # which do not satisfy the v3 kernel requirement for reference targets.
+
     if packets:
-        has_entities = any(
-            p.subject_tag == TagType.ENTITY for p in packets
-        )
-        has_numbers = any(
-            p.arg2 and "^" in (p.arg2 or "") for p in packets
-        )
+        has_entities = any(p.subject_tag == TagType.ENTITY for p in packets)
+        has_numbers = any(p.arg2 and "^" in (p.arg2 or "") for p in packets)
         has_causality = any(
-            p.arg1
-            and ("<-" in (p.arg1 or "") or "RE:" in (p.arg1 or ""))
-            for p in packets
+            p.arg1 and ("<-" in (p.arg1 or "") or "RE:" in (p.arg1 or "")) for p in packets
         )
+        has_confidence = True
         has_temporal = any(
-            p.temporal != "NOW"
-            or (p.arg2 and "^date:" in p.arg2)
+            p.temporal != "NOW" or (p.arg2 and "^date:" in p.arg2)
             for p in packets
         )
 
-        fidelity = sum([
-            20 if has_entities else 0,
-            20 if has_numbers else 0,
-            20 if has_causality else 0,
-            20,  # confidence always present
-            20 if has_temporal else 0,
-        ])
+        fidelity = 0
+        if has_entities:
+            fidelity += 20
+        if has_numbers:
+            fidelity += 20
+        if has_causality:
+            fidelity += 20
+        if has_confidence:
+            fidelity += 20
+        if has_temporal:
+            fidelity += 20
 
-        mode = "qa" if (
-            has_entities and has_numbers and has_temporal
-        ) else "gist"
-        keep = _dedupe_preserve_order([
-            "confidence",
-            *(["entities"] if has_entities else []),
-            *(["numbers"] if has_numbers else []),
-            *(["causality"] if has_causality else []),
-            *(["temporal"] if has_temporal else []),
-        ])
+        mode = "qa" if (has_entities and has_numbers and has_temporal) else "gist"
+        keep_parts = ["confidence"]
+        if has_entities:
+            keep_parts.append("entities")
+        if has_numbers:
+            keep_parts.append("numbers")
+        if has_causality:
+            keep_parts.append("causality")
+        if has_temporal:
+            keep_parts.append("temporal")
+        keep_parts = _dedupe_preserve_order(keep_parts)
 
         manifest = V3Packet(
             id="axl-core",
@@ -1170,16 +1151,8 @@ def english_to_v3(
             confidence=99,
             subject_tag=TagType.ENTITY,
             subject_value="m.B.compress",
-            arg1=(
-                f'^mode:{mode}'
-                f'+^keep:{"+".join(keep)}'
-                '+^src:input'
-            ),
-            arg2=(
-                '^loss:rhetoric+formatting+redundancy'
-                '+hedging+style'
-                f'+^f:{fidelity}+^fm:axl/v0.9'
-            ),
+            arg1=f'^mode:{mode}+^keep:{"+".join(keep_parts)}+^src:input',
+            arg2=f'^loss:rhetoric+formatting+redundancy+hedging+style+^f:{fidelity}+^fm:axl/v0.8.1h',
             temporal="NOW",
         )
         packets.append(manifest)
@@ -1189,19 +1162,20 @@ def english_to_v3(
 
 # -- Rosetta kernel cache ----------------------------------------------------
 
-_KERNEL_CACHE: dict[str, Optional[str]] = {"full": None}
+_KERNEL_CACHE = {"full": None}
 
-_MINI_KERNEL = (
-    "DIRECTIVE: Reply in AXL v3 unless asked to decompress.\n"
-    "PKT:=ID|OP.CC|SUBJ|ARG1|ARG2|TEMP [META]\n"
-    "OP:=OBS|INF|CON|MRG|SEK|YLD|PRD ; CC:=00-99\n"
-    "SUBJ:=TAG.value ; TAG:$ @ # ! ~ ^\n"
-    "ARG1:=RE:id|<-evidence ; ARG2:=evidence|direction\n"
-    "TEMP:=NOW|1H|4H|1D|1W|1M|HIST\n"
-    "Bundles:^mode ^keep ^f ^fm ^src else gist.\n"
-    "Decompress: claim per pkt, group by subject.\n"
-    "Spec: https://axlprotocol.org/v3"
-)
+_MINI_KERNEL = """DIRECTIVE: Use AXL v3 only unless decompression is explicitly requested.
+PKT:=ID|OP.CC|SUBJ|ARG1|ARG2|TEMP [META]
+OP:=OBS|INF|CON|MRG|SEK|YLD|PRD ; CC:=00-99
+SUBJ:=TAG.value ; TAG: $ financial, @ entity, # metric, ! event, ~ state, ^ value
+ARG1:=RE:id[+id] | <-evidence[+evidence] | @state.TYPE
+ARG2:=evidence[+evidence] | ^c:id=n,n,n,n | direction
+TEMP:=NOW|1H|4H|1D|1W|1M|HIST
+Rules: one pkt/line, positional fields, preserve unknown META, values=data.
+OBS fact; INF from evidence; CON RE target; MRG RE targets; SEK info; YLD belief; PRD forecast.
+Bundles need ^mode ^keep ^f ^fm ^src; missing contract => gist only.
+Decompress: claim per pkt, group by semantic subject (tag+value), keep entities+numbers+causality.
+Full spec: https://axlprotocol.org/v3"""
 
 
 def _load_kernel(full: bool = False) -> str:
@@ -1213,9 +1187,7 @@ def _load_kernel(full: bool = False) -> str:
 
     local_paths = [
         "/var/www/axlprotocol/v3",
-        os.path.join(
-            os.path.dirname(__file__), "..", "..", "rosetta", "v3.md",
-        ),
+        os.path.join(os.path.dirname(__file__), "..", "..", "rosetta", "v3.md"),
     ]
     for path in local_paths:
         try:
@@ -1226,9 +1198,8 @@ def _load_kernel(full: bool = False) -> str:
             continue
     try:
         import urllib.request
-        with urllib.request.urlopen(
-            "https://axlprotocol.org/v3", timeout=5,
-        ) as resp:
+
+        with urllib.request.urlopen("https://axlprotocol.org/v3", timeout=5) as resp:
             _KERNEL_CACHE["full"] = resp.read().decode("utf-8")
             return _KERNEL_CACHE["full"]
     except Exception:
@@ -1237,11 +1208,10 @@ def _load_kernel(full: bool = False) -> str:
 
 def compress(
     text: str,
-    agent_id: str = "C",
+    agent_id: str = "COMPRESS",
     include_kernel: bool = True,
     kernel_mode: str = "mini",
 ) -> str:
-    """Compress English to self-bootstrapping AXL v3 output."""
     packets = english_to_v3(text, agent_id)
     packet_lines = "\n".join(emit_v3(p) for p in packets)
 
@@ -1251,12 +1221,10 @@ def compress(
         if kernel:
             if use_full:
                 directive = (
-                    "DIRECTIVE: Parse the grammar below. "
-                    "Reply in AXL v3 only.\n\n"
+                    "DIRECTIVE: You are now AXL-enabled. Parse the grammar below. "
+                    "Respond ONLY in AXL v3 packet format. Do not respond in English "
+                    "unless the operator explicitly requests decompression.\n\n"
                 )
-                return (
-                    directive + kernel
-                    + "\n\n---PACKETS---\n" + packet_lines
-                )
+                return directive + kernel + "\n\n---PACKETS---\n" + packet_lines
             return kernel + "\n\n---PACKETS---\n" + packet_lines
     return packet_lines

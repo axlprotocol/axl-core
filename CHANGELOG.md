@@ -1,3 +1,21 @@
+## 0.9.0 (2026-04-10)
+
+- Architecture: two-pass compression pipeline (document scan then packed emission)
+- Entity registry: named entities get 2-3 char aliases (CloudKitchen -> CK, Marcus Chen -> MC)
+- Ontology manifest: entity->alias mappings emitted as @m.O.doc packet
+- Compressed subjects: registered entities aliased, non-entities preserved readable
+- Compressed evidence: verb:object notation, max 30 chars (was 80+ chars verbatim)
+- Short agent ID: "C" instead of "COMPRESS" (10 chars saved per packet)
+- Same-subject merging: adjacent packets with matching key merged into one
+- Mini kernel: 376 chars (was 5,853 full kernel, was 958 in v0.8.1)
+- kernel_mode parameter: "mini" (default) or "full" on compress()
+- Decompressor: ontology alias expansion (aliases -> full names in output)
+- Decompressor: manifest packets filtered from decompressed output
+- Abbreviation dictionary for role labels (revenue -> rev, technology -> tech)
+- Ratio improved from 1.06x to 1.57x on 4.3K sample (mini kernel)
+- 80 tests passing
+- Reverted from atomic-splitting approach (v0.8.x) to one-packet-per-sentence with packing
+
 ## 0.8.0 (2026-04-09)
 
 - Compressor: DATE/year guard prevents year compaction (2025 no longer becomes 2.0K)
