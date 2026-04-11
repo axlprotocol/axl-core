@@ -1327,7 +1327,7 @@ _MINI_KERNEL = (
     "ARG1:=RE:id|<-evidence ; ARG2:=evidence|direction\n"
     "TEMP:=NOW|1H|4H|1D|1W|1M|HIST\n"
     "Bundles:^mode ^keep ^f ^fm ^src else gist.\n"
-    "v3.1: label[value,qual] for data; @ent.XX for entities; <- src, => causal, -> transition.\n"
+    "v3.1: label[value,qual] for data; @ent.XX for entities; <- evidence, => causal, -> transition.\n"
     "Decompress: claim per pkt, group by subject.\n"
     "Spec: https://axlprotocol.org/v3"
 )
