@@ -196,6 +196,18 @@ _MONEY_RE = re.compile(r"^\d[\d.]*[MBKmbk]$")
 _MULT_RE = re.compile(r"^\d[\d.]*x$")
 _PCT_RE = re.compile(r"[%]")
 
+# Financial key terms that warrant a $ prefix on K/M/B values
+_FINANCIAL_KEYS = {
+    "rev", "revenue", "cost", "costs", "price", "salary", "budget", "fee",
+    "fund", "funding", "profit", "loss", "margin", "valuation", "cash",
+    "burn", "amt", "amount", "funding", "investment", "capital", "opex",
+    "proceeds", "capex", "ebitda", "mrr", "arr", "cac", "ltv", "arpu",
+    "cogs", "nrc", "debt", "equity", "credit", "income",
+}
+
+# v3.1 bundle pattern: label[value] or label[value,qualifier]
+_BUNDLE_RE = re.compile(r"([^[;]+)\[([^\]]*)\]")
+
 
 # -- Parsing (kept from v0.9.0) ---------------------------------------------
 
@@ -346,6 +358,24 @@ def _expand_alias(value: str, aliases: dict[str, str]) -> str:
 
 # -- Subject cleaning --------------------------------------------------------
 
+# Generic references that should resolve to primary entity
+_GENERIC_REFS = {
+    "the company", "the firm", "the organization",
+    "the business", "the enterprise", "the startup",
+    "the corporation", "the group", "the entity",
+}
+
+
+def _primary_entity(aliases: dict[str, str]) -> str:
+    """Get the first/primary entity from the ontology."""
+    if not aliases:
+        return ""
+    # First value in aliases dict (insertion order)
+    for full_name in aliases.values():
+        return full_name
+    return ""
+
+
 def _clean_subject(
     base: str, aspect: Optional[str], aliases: dict[str, str],
 ) -> str:
@@ -353,12 +383,18 @@ def _clean_subject(
     # Expand aliases
     base = _expand_alias(base, aliases)
 
+    # Resolve generic references to primary entity
+    base_lower = base.lower().strip()
+    if base_lower in _GENERIC_REFS:
+        primary = _primary_entity(aliases)
+        if primary:
+            base = primary
+
     # Strip leading articles from aspect
     if aspect:
         aspect_clean = re.sub(
             r"^(The|the|A|a|An|an|The s|the s)\s*", "", aspect,
         ).strip()
-        # If aspect is just an article or empty after strip, ignore it
         if not aspect_clean or aspect_clean.lower() in (
             "the", "a", "an", "s",
         ):
@@ -367,14 +403,19 @@ def _clean_subject(
             aspect = aspect_clean
 
     # If base is a garbage 2-3 char alias with no expansion
-    base_lower = base.lower().strip()
     if base_lower in _GARBAGE_SUBJECTS and len(base) <= 4:
-        # Try to make it readable
-        return base.upper() if not aspect else f"{base.upper()} {aspect}"
+        primary = _primary_entity(aliases)
+        if primary:
+            base = primary
+        else:
+            return (
+                base.upper()
+                if not aspect
+                else f"{base.upper()} {aspect}"
+            )
 
     # Build subject phrase
     if aspect:
-        # Don't possessive if aspect starts with number or is a role
         return f"{base} - {aspect}"
 
     # Capitalize if needed
@@ -385,6 +426,60 @@ def _clean_subject(
 
 
 # -- Value formatting --------------------------------------------------------
+
+def _parse_bundles(arg2: str) -> Optional[list[dict]]:
+    """Parse label[value,qualifier] bundles from v3.1 syntax."""
+    if not arg2 or "[" not in arg2:
+        return None
+
+    bundles = []
+    for item in arg2.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        m = _BUNDLE_RE.match(item)
+        if m:
+            label = m.group(1).strip()
+            inner = m.group(2).strip()
+            parts = [p.strip() for p in inner.split(",")]
+            value = parts[0]
+            qualifier = parts[1] if len(parts) > 1 else None
+            bundles.append({"label": label, "value": value, "qualifier": qualifier})
+        else:
+            bundles.append({"label": item, "value": item, "qualifier": None})
+
+    return bundles if bundles else None
+
+
+def _format_bundle_list(
+    bundles: list[dict], ent_anchors: Optional[dict] = None
+) -> str:
+    """Convert parsed v3.1 bundles into readable prose."""
+    phrases = []
+    for b in bundles:
+        label_raw = b["label"].replace("_", " ").strip()
+        # Expand @ent.XX labels to full names
+        ent_m = re.match(r"@ent\.(\w+)", label_raw)
+        if ent_m:
+            alias = ent_m.group(1)
+            label_raw = (ent_anchors or {}).get(alias, alias)
+        label_l = label_raw.lower()
+        label_exp = _ABBREV_REVERSE.get(label_l, label_raw)
+        value = b["value"]
+        qualifier = b["qualifier"]
+
+        # Expand transition values (21.3%->15.8%)
+        if "->" in value:
+            parts = value.split("->", 1)
+            value = f"{parts[0]} to {parts[1]}"
+
+        if qualifier:
+            phrases.append(f"{label_exp} {value} ({qualifier})")
+        else:
+            phrases.append(f"{label_exp} {value}")
+
+    return ", ".join(phrases)
+
 
 def _format_single_value(key: str, val: str) -> str:
     """Format a single key:value pair into readable text."""
@@ -418,11 +513,16 @@ def _format_single_value(key: str, val: str) -> str:
     if _MULT_RE.match(v):
         return f"{v} multiple"
 
-    # Money values (M/B/K suffix)
+    # Money values (M/B/K suffix) - only add $ for financial keys
     if _MONEY_RE.match(v):
-        if key_l in ("date", "count"):
+        if key_l == "date":
             return v
-        return f"${v}"
+        orig_key_l = key.lower().strip() if key else ""
+        # Use original key (before abbrev expansion) to check financial context
+        raw_key_l = orig_key_l.split()[0] if orig_key_l else ""
+        if raw_key_l in _FINANCIAL_KEYS or key_l in _FINANCIAL_KEYS:
+            return f"${v}"
+        return v  # non-financial K/M (facilities, locations, orders)
 
     # Bare numbers in financial context
     if re.match(r"^\d[\d,.]*$", v) and key_l in (
@@ -466,15 +566,38 @@ def _extract_state(arg2: Optional[str]) -> str:
     return _STATE_ADJECTIVES.get(state_raw.lower(), state_raw)
 
 
-def _format_values(arg2: Optional[str]) -> str:
+def _format_values(
+    arg2: Optional[str], ent_anchors: Optional[dict] = None
+) -> str:
     """Format all values from raw ARG2 into readable prose."""
     if not arg2:
         return ""
 
+    # v3.1: handle causal chain with => operator in arg2
+    # e.g. "food_inflation[+8.2%] => menu_price[+4.5%] => margin[21.3%->15.8%]"
+    if "=>" in arg2:
+        chain_parts = [p.strip() for p in arg2.split("=>")]
+        chain_texts = []
+        for cp in chain_parts:
+            bundles = _parse_bundles(cp)
+            if bundles:
+                chain_texts.append(_format_bundle_list(bundles, ent_anchors))
+            else:
+                chain_texts.append(cp.replace("_", " "))
+        return ", which caused ".join(chain_texts)
+
+    # v3.1: detect label[value] bundle format (semicolons as separators)
+    bundles = _parse_bundles(arg2)
+    if bundles is not None:
+        return _format_bundle_list(bundles, ent_anchors)
+
+    # Classic v3: ^label:value+ format
     parts = [p.strip() for p in arg2.split("+") if p.strip()]
     formatted = []
 
     for part in parts:
+        # Preserve $ prefix - track if it was present before stripping sigils
+        has_dollar = part.lstrip("^~@#!").startswith("$")
         clean = re.sub(r"^[\^~\$@#!]", "", part)
 
         # Skip state entries (handled separately)
@@ -492,6 +615,9 @@ def _format_values(arg2: Optional[str]) -> str:
                 formatted.append(rendered)
         else:
             text = clean.replace("_", " ")
+            # Re-add $ if it was stripped and value looks monetary
+            if has_dollar and text and not text.startswith("$"):
+                text = f"${text}"
             if text and text not in formatted:
                 formatted.append(text)
 
@@ -507,9 +633,42 @@ def _format_evidence(arg1: Optional[str]) -> str:
 
     text = arg1.strip()
 
-    # Strip prefixes
+    # v3.1: causal operator => (starting)
+    if text.startswith("=>"):
+        text = text[2:].strip()
+        text = text.replace("_", " ")
+        return f"causing {text}"
+
+    # v3.1: inline => causal chain in evidence (e.g. ask[$34M,8.9x] => above_comps)
+    if "=>" in text and "[" in text:
+        # Treat as a values-style causal chain
+        return _format_values(text)
+
+    # v3.1: numeric transition ->
+    if text.startswith("->"):
+        text = text[2:].strip()
+        parts = text.split("->", 1)
+        if len(parts) == 2:
+            return f"from {parts[0].strip()} to {parts[1].strip()}"
+        return text.replace("_", " ")
+
+    # Strip classic prefixes
     text = re.sub(r"^<-@?", "", text)
     text = re.sub(r"^RE:", "references ", text)
+
+    # v3.1: expand subject references like $CK.rev.FY25 or @ent.XX
+    text = re.sub(r"@ent\.(\w+)", r"\1", text)
+    # Expand dot-path financial references: $CK.rev.FY25 -> CK revenue FY25
+    def _expand_ref(m: re.Match) -> str:
+        path = m.group(2)  # e.g. CK.rev.FY25
+        parts = path.split(".")
+        expanded_parts = []
+        for p in parts:
+            pl = p.lower()
+            expanded_parts.append(_ABBREV_REVERSE.get(pl, p))
+        return " ".join(expanded_parts)
+
+    text = re.sub(r"([$@#!~^])(\w+(?:\.\w+)*)", _expand_ref, text)
 
     # Replace underscores
     text = text.replace("_", " ").strip()
@@ -551,7 +710,9 @@ def _confidence_suffix(cc: int) -> str:
 
 # -- Sentence reconstruction ------------------------------------------------
 
-def _build_sentence(parsed: dict, aliases: dict[str, str]) -> str:
+def _build_sentence(
+    parsed: dict, aliases: dict[str, str], ent_anchors: Optional[dict] = None
+) -> str:
     """Build a readable English sentence from a parsed packet."""
     subject = _clean_subject(
         parsed.get("base_subject", ""),
@@ -564,9 +725,25 @@ def _build_sentence(parsed: dict, aliases: dict[str, str]) -> str:
     arg2 = parsed.get("arg2")
     temp = parsed.get("temp", "NOW")
 
-    state = _extract_state(arg2)
-    values = _format_values(arg2)
-    evidence = _format_evidence(arg1)
+    # v3.1: for @ent.XX declaration packets (tag_value starts with 'ent.'),
+    # ARG1 is the full entity name (not evidence). Clear it from evidence.
+    raw_tag_val = parsed.get("tag_value", "")
+    if raw_tag_val.startswith("ent.") and arg1 and not arg1.startswith(
+        ("<-", "=>", "->", "RE:")
+    ):
+        arg1 = None  # suppress declaration ARG1 from evidence display
+
+    # v3.1: when ARG1 contains bundle data (has '[') and ARG2 is evidence ('<-'/'=>')
+    # swap the semantic roles: treat ARG1 as values, ARG2 as evidence
+    if (arg1 and "[" in arg1 and
+            arg2 and (arg2.startswith("<-") or arg2.startswith("=>") or arg2.startswith("->"))):
+        values_raw, evidence_raw = arg1, arg2
+    else:
+        values_raw, evidence_raw = arg2, arg1
+
+    state = _extract_state(values_raw)
+    values = _format_values(values_raw, ent_anchors)
+    evidence = _format_evidence(evidence_raw)
     prefix = _confidence_prefix(cc)
     suffix = _confidence_suffix(cc)
     temporal = TEMP_PROSE.get(temp, "")
@@ -712,6 +889,41 @@ def _classify_topic(
 
 # -- Main pipeline -----------------------------------------------------------
 
+def _extract_ent_anchors(packets: list[dict]) -> dict[str, str]:
+    """Build a registry of @ent.XX aliases from v3.1 declaration packets.
+
+    A declaration packet has subject tag_value starting with 'ent.' and
+    arg1 containing the full entity name.
+    """
+    anchors: dict[str, str] = {}
+    for pkt in packets:
+        tag_val = pkt.get("tag_value", "")
+        if not tag_val.startswith("ent."):
+            continue
+        alias = tag_val[4:]  # strip 'ent.'
+        # Remove any sub-path (ent.CK.sales -> alias = CK)
+        alias = alias.split(".")[0]
+        arg1 = pkt.get("arg1") or ""
+        # arg1 should be the full entity name on first mention
+        if arg1 and not arg1.startswith(("<-", "=>", "->", "RE:")):
+            anchors[alias] = arg1.strip()
+    return anchors
+
+
+def _resolve_ent_subject(tag_value: str, ent_anchors: dict[str, str]) -> str:
+    """Expand @ent.XX subject to full name if known."""
+    if not tag_value.startswith("ent."):
+        return tag_value
+    rest = tag_value[4:]  # e.g. "CK" or "CK.sales" or "WTW"
+    parts = rest.split(".", 1)
+    alias = parts[0]
+    sub = parts[1] if len(parts) > 1 else None
+    full = ent_anchors.get(alias, alias)
+    if sub:
+        return f"{full} - {sub.replace('_', ' ')}"
+    return full
+
+
 def v3_to_english(packets_text: str) -> list[dict]:
     text = strip_kernel(packets_text)
     if not text:
@@ -727,6 +939,7 @@ def v3_to_english(packets_text: str) -> list[dict]:
             all_parsed.append(parsed)
 
     aliases = _extract_ontology(all_parsed)
+    ent_anchors = _extract_ent_anchors(all_parsed)
 
     claims = []
     for parsed in all_parsed:
@@ -734,12 +947,27 @@ def v3_to_english(packets_text: str) -> list[dict]:
         if subj.startswith("m.O.") or subj.startswith("m.B."):
             continue
 
-        sentence = _build_sentence(parsed, aliases)
+        # v3.1: resolve @ent.XX subjects
+        if subj.startswith("ent."):
+            full_name = _resolve_ent_subject(subj, ent_anchors)
+            # Patch parsed so _build_sentence sees the expanded name
+            parsed = dict(parsed)
+            dot = full_name.find(" - ")
+            if dot >= 0:
+                parsed["base_subject"] = full_name[:dot]
+                parsed["aspect"] = full_name[dot + 3:]
+            else:
+                parsed["base_subject"] = full_name
+                parsed["aspect"] = None
+            # Skip pure declaration packets (arg2 is the entity description)
+            # but still emit them as observations
+
+        sentence = _build_sentence(parsed, aliases, ent_anchors)
         if not sentence:
             continue
 
         state = _extract_state(parsed.get("arg2"))
-        values = _format_values(parsed.get("arg2"))
+        values = _format_values(parsed.get("arg2"), ent_anchors)
         subject = _clean_subject(
             parsed.get("base_subject", ""),
             parsed.get("aspect"),
@@ -799,28 +1027,38 @@ def format_decompressed(claims: list[dict]) -> str:
         if not section_claims:
             continue
 
-        lines = []
+        # Build paragraph: join sentences into flowing text
+        sentences = []
         for claim in section_claims:
             text = claim["claim_text"].strip()
             if text:
-                lines.append(f"  {text}")
+                # Ensure sentence ends with period
+                if text and text[-1] not in ".!?":
+                    text += "."
+                sentences.append(text)
 
-        if lines:
+        if sentences:
+            # Join into paragraph(s) - max 4 sentences per paragraph
+            paragraphs = []
+            for i in range(0, len(sentences), 4):
+                chunk = sentences[i:i + 4]
+                paragraphs.append(" ".join(chunk))
             sections.append(
-                f"## {topic}\n\n" + "\n\n".join(lines)
+                f"{topic}\n\n" + "\n\n".join(paragraphs)
             )
 
     # Any remaining topics not in the order
     for topic, section_claims in topics.items():
         if topic in topic_order:
             continue
-        lines = [
-            f"  {c['claim_text']}" for c in section_claims
+        sentences = [
+            c["claim_text"].strip()
+            for c in section_claims
             if c["claim_text"].strip()
         ]
-        if lines:
+        if sentences:
             sections.append(
-                f"## {topic}\n\n" + "\n\n".join(lines)
+                f"{topic}\n\n" + " ".join(sentences)
             )
 
     return "\n\n".join(sections)

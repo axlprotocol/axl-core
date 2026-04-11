@@ -1,0 +1,22 @@
+nv|OBS.99|$CK.rev.FY25|$3.8M total, 3 streams|breakdown follows|HIST
+nv|OBS.99|$CK.rev.parts|tenant[$1.52M,40%];brands[$1.862M,49%];KitchenOS[$418K,11%]|<-$CK.rev.FY25|HIST
+nv|OBS.99|$CK.opex.FY25|$5.94M total, 7 categories|breakdown follows|HIST
+nv|OBS.99|$CK.opex.parts|facility[$1.68M,28.3%];food[$1.118M,18.8%];commission[$419K,7.1%];labor[$1.56M,26.3%];tech[$480K,8.1%];mktg[$324K,5.5%];G&A[$359K,6%]|<-$CK.opex.FY25|HIST
+nv|OBS.99|@ent.brands|8 proprietary delivery brands|total $1.862M|HIST
+nv|OBS.95|@ent.WTW|WokThisWay|$624K, 12 locations|HIST
+nv|OBS.95|@ent.BA|BurgerAssembly|$412K, 10 locations|HIST
+nv|OBS.95|@ent.TP|TacoProtocol|$287K, 8 locations|HIST
+nv|OBS.90|@ent.GM|GreenMachine|$198K, 7 locations|HIST
+nv|OBS.90|@ent.PP|PizzaPi|$156K, 6 locations|HIST
+nv|OBS.85|@ent.NN|NoodleNode|$98K, 5 locations|HIST
+nv|OBS.80|@ent.CC|ChickenCircuit|$52K, 4 locations|HIST
+nv|OBS.80|@ent.CK2|CurryKernel|$35K, 3 locations|HIST
+nv|INF.85|!CK.margin.compression|food_inflation[+8.2%] => menu_price[+4.5%] => margin[21.3%->15.8%]|Q1->Q4 2025|HIST [^trust:2]
+nv|OBS.90|@ent.KH|KitchenHub (Toronto)|locations[25,ON+QC];raised[$12M,SerA];valuation[$48M,2024];model[tenant-only];occupancy[78%]|NOW
+nv|OBS.99|$CK.cash.Dec2025|cash[$1.2M];credit[$350K,undrawn];burn[$178K/mo];runway[8.7mo]|as of Dec 31 2025|NOW [^trust:1]
+nv|OBS.90|#CK.unit.economics|per-facility monthly|rev[$21.1K];cost[$14.8K];contrib[$6.3K,29.9%]|with corp allocation|NOW
+nv|OBS.80|$CK.proj.FY26|rev[$8.2M,+116%];facilities[24];net[-$1.8M];burn[$150K/mo,by Q4]|1M
+nv|OBS.70|$CK.proj.FY27|rev[$16.5M,+101%];facilities[38];net[+$1.2M,first profit];EBITDA[12.5%]|1M
+nv|OBS.65|$CK.proj.FY28|rev[$28M,+70%];facilities[55];net[+$4.2M];EBITDA[19.5%]|1M
+nv|INF.80|$CK.val.concern|ask[$34M,8.9x] => above_comps|@ent.GKBR[2.1x];@ent.KH[6.0x];competing[$30M,7.9x];fair_range[$22.8M-$30.4M,6.0-8.0x]|NOW [^trust:2]
+nv|OBS.99|$CK.financials.PL|FY24[rev=$1.2M,opex=$2.24M,loss=$1.04M];FY25[rev=$3.8M,opex=$5.94M,loss=$2.14M]|YoY comparison|HIST

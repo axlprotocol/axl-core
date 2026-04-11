@@ -46,4 +46,4 @@ def test_cli_translate_json():
 def test_cli_version():
     result = run_cli("version")
     assert result.returncode == 0
-    assert "0.9.0" in result.stdout
+    assert "0.10.0" in result.stdout

@@ -70,12 +70,17 @@ def _abbr(word: str, max_len: int = 10) -> str:
 
 
 class EntityRegistry:
-    """Assigns short 2-3 char aliases to named entities."""
+    """Assigns short 2-3 char aliases to named entities.
+
+    v3.1: tracks which aliases have been declared (first use) so the
+    compressor can emit @ent.XX with full name in ARG1 on first mention.
+    """
 
     def __init__(self):
         self._to_alias: dict[str, str] = {}
         self._to_full: dict[str, str] = {}
         self._used: set[str] = set()
+        self._declared_entities: set[str] = set()
 
     def get(self, full_name: str) -> Optional[str]:
         return self._to_alias.get(full_name.lower().strip())
@@ -89,6 +94,17 @@ class EntityRegistry:
         self._to_full[alias] = full_name
         self._used.add(alias.lower())
         return alias
+
+    def declare(self, alias: str) -> bool:
+        """Mark alias as declared. Returns True if this is the first declaration."""
+        if alias in self._declared_entities:
+            return False
+        self._declared_entities.add(alias)
+        return True
+
+    def full_name(self, alias: str) -> Optional[str]:
+        """Return full name for alias, or None."""
+        return self._to_full.get(alias)
 
     def _make_alias(self, name: str) -> str:
         words = name.split()
@@ -497,8 +513,23 @@ _ATTRIBUTION_MARKERS = {"according", "reported", "per"}
 _PREP_CAUSAL_HEADS = {"due", "based", "driven", "caused"}
 
 
+def _causal_prefix(evidence_text: str) -> str:
+    """Classify evidence text as source (<-), causal (=>), or transition (->)."""
+    el = evidence_text.lower()
+    if any(w in el for w in ("caused", "cause", "led to", "resulted", "driven by", "due to")):
+        return "=>"
+    if re.search(r"\d.*(?:to|->)\s*\d", evidence_text):
+        return "->"
+    return "<-"
+
+
 def extract_evidence(text: str, doc=None) -> Optional[str]:
     """Extract evidence/cause from text.
+
+    v3.1: operator is now split:
+    - '<-' for source/provenance
+    - '=>' for causal effect
+    - '->' for numeric transitions
 
     Important fix from v0.7.0:
     dependency fallback now ignores generic root-level prepositions such as
@@ -506,18 +537,19 @@ def extract_evidence(text: str, doc=None) -> Optional[str]:
     causal evidence.
     """
     patterns = [
-        (r"\b(?:because|since|as)\b\s+(.+?)(?:\.|,|$)", "<-"),
-        (r"\b(?:based on|due to|driven by|caused by)\b\s+(.+?)(?:\.|,|$)", "<-"),
+        (r"\b(?:because|since|as)\b\s+(.+?)(?:\.|,|$)", None),
+        (r"\b(?:based on|due to|driven by|caused by)\b\s+(.+?)(?:\.|,|$)", None),
         (r"\b(?:according to|reported by|per)\b\s+(.+?)(?:\.|,|$)", "<-@"),
         (r"\b(?:disagrees? with|contradicts?|challenges?)\b\s+(.+?)(?:\.|,|$)", "RE:"),
     ]
 
-    for pattern, prefix in patterns:
+    for pattern, fixed_prefix in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             evidence = match.group(1).strip()[:80]
             evidence = _compress_evidence_text(evidence)
             if evidence:
+                prefix = fixed_prefix if fixed_prefix else _causal_prefix(match.group(1))
                 return f"{prefix}{evidence}"
 
     if not doc:
@@ -534,14 +566,16 @@ def extract_evidence(text: str, doc=None) -> Optional[str]:
                 subtree = " ".join(t.text for t in token.subtree)
                 compressed = _compress_evidence_text(subtree)
                 if compressed and len(compressed) > 3:
-                    return f"<-{compressed}"
+                    prefix = _causal_prefix(subtree)
+                    return f"{prefix}{compressed}"
 
         if (token.dep_ == "prep"
                 and token.lemma_.lower() in _PREP_CAUSAL_HEADS):
             subtree = " ".join(t.text for t in token.subtree)
             compressed = _compress_evidence_text(subtree)
             if compressed and len(compressed) > 3:
-                return f"<-{compressed}"
+                prefix = _causal_prefix(subtree)
+                return f"{prefix}{compressed}"
 
     return None
 
@@ -870,16 +904,33 @@ def _dedupe_preserve_order(items: Iterable[str]) -> list[str]:
     return out
 
 
+def _format_bundle(label: str, value: str, qualifier: Optional[str] = None) -> str:
+    """Format a v3.1 numeric bundle: label[value] or label[value,qualifier]."""
+    if qualifier:
+        return f"{label}[{value},{qualifier}]"
+    return f"{label}[{value}]"
+
+
+def _is_financial_value(normalized: str) -> bool:
+    """Check if a normalized value looks like a monetary amount."""
+    return bool(re.match(r"^[-+]?\d[\d.]*[MBKmbk]$", normalized))
+
+
 def extract_packed_arg2(doc, registry: Optional[EntityRegistry] = None) -> str:
     """Pack ALL values from a sentence into a single dense ARG2.
 
     v0.9.0 strategy: one packet per sentence, all values packed.
     Uses role labels (^rev:8.5M) instead of type labels (^amt:8.5M)
     when a semantic role is available.
+
+    v3.1: when 3+ numeric values exist, format as semicolon-separated
+    label[value,qualifier] bundles instead of ^label:value+ chains.
     """
     qualifiers = collect_role_qualifiers(doc)
-    parts: list[str] = []
-    seen: set[str] = set()
+
+    # Collect (label, value, ent_label) tuples
+    collected: list[tuple[str, str, str]] = []
+    seen_atoms: set[str] = set()
 
     for ent in doc.ents:
         if ent.label_ not in NER_TO_VALUE_PREFIX:
@@ -891,13 +942,46 @@ def extract_packed_arg2(doc, registry: Optional[EntityRegistry] = None) -> str:
         prefix = NER_TO_VALUE_PREFIX[ent.label_]
         role = infer_role_label(ent, doc)
 
-        # Use role as label if available, else type prefix
-        if role:
-            label = _abbr(role, 8)
-        else:
-            label = prefix
+        label = _abbr(role, 8) if role else prefix
+        atom_key = f"{label}:{normalized}"
+        if atom_key not in seen_atoms:
+            seen_atoms.add(atom_key)
+            collected.append((label, normalized, ent.label_))
 
-        atom = f"^{label}:{normalized}"
+    if not collected:
+        return ""
+
+    # v3.1: 3+ numeric values -> bundle format
+    numeric_labels = {"MONEY", "PERCENT", "CARDINAL", "QUANTITY"}
+    numeric_items = [c for c in collected if c[2] in numeric_labels]
+
+    if len(numeric_items) >= 3:
+        # Build bundles: attach pct qualifier to adjacent money values
+        bundles: list[str] = []
+        pct_values = [c[1] for c in numeric_items if c[2] == "PERCENT"]
+        pct_idx = 0
+        for label, value, ent_label in numeric_items:
+            if ent_label == "PERCENT":
+                continue  # pcts become qualifiers, not standalone bundles
+            # Prefix financial values with $
+            display = f"${value}" if _is_financial_value(value) else value
+            # Attach next available percent as qualifier
+            qualifier = None
+            if pct_idx < len(pct_values):
+                qualifier = pct_values[pct_idx] + "%"
+                # Only attach if percent has no % already
+                if "%" in pct_values[pct_idx]:
+                    qualifier = pct_values[pct_idx]
+                pct_idx += 1
+            bundles.append(_format_bundle(label, display, qualifier))
+        if bundles:
+            return ";".join(bundles[:6])
+
+    # Fallback: classic ^label:value+ format
+    parts: list[str] = []
+    seen: set[str] = set()
+    for label, value, _ in collected:
+        atom = f"^{label}:{value}"
         if atom not in seen:
             seen.add(atom)
             parts.append(atom)
@@ -910,8 +994,6 @@ def extract_packed_arg2(doc, registry: Optional[EntityRegistry] = None) -> str:
                 parts.append(q)
             break
 
-    if not parts:
-        return ""
     return "+".join(parts[:6])
 
 
@@ -936,8 +1018,12 @@ def _seek_target_arg(sent_text: str) -> str:
 
 def _alias_subject(
     tag: TagType, value: str, registry: EntityRegistry,
-) -> str:
+) -> tuple[str, Optional[str]]:
     """Compress a subject using entity aliases.
+
+    v3.1: returns (subject_value, declaration_arg1) where
+    declaration_arg1 is the full name for first-mention packets,
+    None on subsequent mentions.
 
     Only registered entities get aliased. Non-entity subjects
     keep their original text (cleaned and truncated) so the
@@ -945,10 +1031,15 @@ def _alias_subject(
     """
     full_text = value.replace("_", " ")
 
-    # Exact match: registered entity -> short alias
+    # Exact match: registered entity -> @ent.ALIAS
     alias = registry.get(full_text)
     if alias:
-        return alias
+        ent_subj = f"ent.{alias}"
+        if registry.declare(alias):
+            # First mention: provide full name as declaration
+            full = registry.full_name(alias) or full_text
+            return ent_subj, full
+        return ent_subj, None
 
     # Partial match: subject contains a registered entity
     words = full_text.split()
@@ -960,11 +1051,16 @@ def _alias_subject(
             ]
             if remaining:
                 role = "_".join(remaining)[:12]
-                return f"{a}.{role}"
-            return a
+                ent_subj = f"ent.{a}.{role}"
+            else:
+                ent_subj = f"ent.{a}"
+            if registry.declare(a):
+                full = registry.full_name(a) or w
+                return ent_subj, full
+            return ent_subj, None
 
     # No entity match: keep original, just truncate
-    return _truncate_word(value, 30)
+    return _truncate_word(value, 30), None
 
 
 def _merge_same_subject_packets(
@@ -1073,8 +1169,8 @@ def english_to_v3(
         if tag_type == TagType.ENTITY:
             ctx_subj = (tag_type, raw_subject)
 
-        # Compress subject using entity aliases
-        subject_value = _alias_subject(tag_type, raw_subject, registry)
+        # Compress subject using entity aliases (v3.1: returns tuple)
+        subject_value, decl_arg1 = _alias_subject(tag_type, raw_subject, registry)
 
         temporal = extract_temporal(sent_text)
         evidence = extract_evidence(sent_text, sent_doc)
@@ -1095,13 +1191,45 @@ def english_to_v3(
         # Pack ALL values from sentence into one ARG2
         arg2 = extract_packed_arg2(sent_doc, registry)
 
+        # v3.1: first-mention entity declaration overrides evidence in ARG1
+        effective_arg1 = decl_arg1 if decl_arg1 else evidence
+
+        # v3.1: summary+breakdown split when 4+ semicolon bundles
+        if arg2 and arg2.count(";") >= 3:
+            # Count semicolon-separated bundles
+            bundle_count = arg2.count(";") + 1
+            if bundle_count >= 4:
+                # Emit summary packet
+                packets.append(V3Packet(
+                    id=agent_id,
+                    operation=operation,
+                    confidence=confidence,
+                    subject_tag=tag_type,
+                    subject_value=subject_value,
+                    arg1=effective_arg1,
+                    arg2="breakdown follows",
+                    temporal=temporal,
+                ))
+                # Emit breakdown packet
+                packets.append(V3Packet(
+                    id=agent_id,
+                    operation=operation,
+                    confidence=confidence,
+                    subject_tag=tag_type,
+                    subject_value=f"{subject_value}.parts",
+                    arg1=f"<-{subject_value}",
+                    arg2=arg2,
+                    temporal=temporal,
+                ))
+                continue
+
         packets.append(V3Packet(
             id=agent_id,
             operation=operation,
             confidence=confidence,
             subject_tag=tag_type,
             subject_value=subject_value,
-            arg1=evidence,
+            arg1=effective_arg1,
             arg2=arg2 or None,
             temporal=temporal,
         ))
@@ -1199,6 +1327,7 @@ _MINI_KERNEL = (
     "ARG1:=RE:id|<-evidence ; ARG2:=evidence|direction\n"
     "TEMP:=NOW|1H|4H|1D|1W|1M|HIST\n"
     "Bundles:^mode ^keep ^f ^fm ^src else gist.\n"
+    "v3.1: label[value,qual] for data; @ent.XX for entities; <- src, => causal, -> transition.\n"
     "Decompress: claim per pkt, group by subject.\n"
     "Spec: https://axlprotocol.org/v3"
 )

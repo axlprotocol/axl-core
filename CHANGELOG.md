@@ -1,3 +1,17 @@
+## 0.10.0 (2026-04-11)
+
+- v3.1 Data Anchoring extension (4 additive conventions)
+- Numeric bundles: label[$value,qualifier] syntax for critical quantities
+- Entity anchors: @ent.XX explicit named entity declarations with full name in ARG1
+- Causal operator split: <- evidence, => causal effect, -> numeric transition
+- Summary+breakdown pairs for packets with 4+ data points
+- Cold decompression recovery: Qwen 61%->100%, Gemini 35%->76%
+- Compression cost: +0.4% (neutral)
+- Decompressor: fixed $ prefix on non-financial K/M values
+- Decompressor: parse label[value] bundles into readable prose
+- Decompressor: parse => and -> operators with proper expansion
+- Decompressor: @ent.XX entity anchor resolution
+
 ## 0.9.0 (2026-04-10)
 
 - Architecture: two-pass compression pipeline (document scan then packed emission)
