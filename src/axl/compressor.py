@@ -1113,7 +1113,7 @@ def english_to_v3(
     # Ontology manifest with entity registry
     if registry.has_aliases():
         onto_str = registry.ontology_string()
-        if len(onto_str) <= 200:
+        if len(onto_str) <= 800:
             onto = V3Packet(
                 id="axl-core",
                 operation=Operation.OBS,
