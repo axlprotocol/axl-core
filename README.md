@@ -187,6 +187,24 @@ Two live experiments. Real agents. Real packets. Real results.
 Full v3 parser, emitter, validator, and translator included.
 Auto-detects v1 vs v3 format. All v1 code preserved for backward compatibility.
 
+### v3.1 Data Anchoring (NEW)
+
+Four additive conventions that improve cold decompression recovery by ~40 points:
+
+| Convention | Syntax | Purpose |
+|-----------|--------|---------|
+| Numeric Bundles | `label[$value,qualifier]` | Critical quantities survive cold models |
+| Entity Anchors | `@ent.XX` | Named entities declared explicitly |
+| Causal Split | `<-` evidence, `=>` causal, `->` transition | Distinct directional operators |
+| Summary+Breakdown | Paired packets | Dense data split for preservation |
+
+**Cold recovery results:**
+- Qwen 3.5 (35B): 61% to 100% (+39 pts)
+- Gemini Flash: 35% to 76% (+41 pts)
+- Compression cost: +0.4% (neutral)
+
+Full spec: [v3.1 Data Anchoring](https://axlprotocol.org/v3.1)
+
 ```python
 from axl import parse_v3, emit_v3, validate_v3, v3_to_json, v3_to_english
 
